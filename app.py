@@ -2,7 +2,7 @@ from flask import Flask, render_template, jsonify, request
 import httpx
 import asyncio
 import time
-from apscheduler.schedulers.background import BackgroundScheduler
+from threading import Thread
 
 app = Flask(__name__)
 
@@ -10,6 +10,7 @@ MARKET_DATA_CACHE = []
 GLOBAL_PORTFOLIO_DYNAMICS = {}
 LAST_ALERTS_STATE = {}
 LAST_BROADCAST_TIME = 0
+ENGINE_INITIALIZED = False
 
 # ==================== TELEGRAM BOT CONFIGURATION ====================
 TELEGRAM_TOKEN = "8979605471:AAGToVU4-bkZIPi9DeqhE8CCNYIp-bM3Bvs"
@@ -20,7 +21,6 @@ LIVE_PRICE_MAP = {}
 GLOBAL_BTC_STATUS = {"is_safe": True, "reason": "Connecting"}
 
 def send_telegram_alert_sync(message):
-    """Fungsi sinkron murni untuk mengirim pesan Telegram tanpa bergantung pada event loop Flask"""
     if not TELEGRAM_TOKEN or "ENTER_TOKEN" in TELEGRAM_TOKEN:
         return False
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -311,8 +311,7 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
             print(f"Error processing {symbol}: {e}")
             return None
 
-async def run_market_scanner_async():
-    """Fungsi asinkron murni yang dipanggil berkala oleh Scheduler untuk memperbarui cache"""
+async def execute_one_market_scan():
     global MARKET_DATA_CACHE, LAST_BROADCAST_TIME
     
     async with httpx.AsyncClient() as client:
@@ -330,7 +329,6 @@ async def run_market_scanner_async():
         temp_data.sort(key=lambda x: (x['is_portfolio'], x['skor']), reverse=True)
         MARKET_DATA_CACHE = temp_data
 
-        # ENGINE AUTO BROADCAST TELEGRAM 5 MENIT
         current_time = time.time()
         if current_time - LAST_BROADCAST_TIME >= 300:
             scanner_coins = [c for c in temp_data if not c['is_portfolio']]
@@ -360,21 +358,22 @@ async def run_market_scanner_async():
                 send_telegram_alert_sync(msg)
                 LAST_BROADCAST_TIME = current_time
 
-def scheduled_job_bridge():
-    """Jembatan sinkron untuk mengeksekusi fungsi asinkron utama di dalam thread scheduler"""
-    try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(run_market_scanner_async())
-    except Exception as e:
-        print(f"Scheduler Worker Error: {e}")
-    finally:
-        loop.close()
+def run_loop_in_bg():
+    while True:
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(execute_one_market_scan())
+        except Exception as e:
+            print(f"Background Loop Error: {e}")
+        time.sleep(15)
 
-# Inisialisasi Penjadwal Latar Belakang (Aman untuk Render)
-scheduler = BackgroundScheduler(daemon=True)
-scheduler.add_job(scheduled_job_bridge, 'interval', seconds=15, id='quantum_engine_job')
-scheduler.start()
+@app.before_request
+def trigger_engine_startup():
+    global ENGINE_INITIALIZED
+    if not ENGINE_INITIALIZED:
+        Thread(target=run_loop_in_bg, daemon=True).start()
+        ENGINE_INITIALIZED = True
 
 @app.route('/')
 def index(): 
@@ -384,9 +383,13 @@ def index():
 def get_data():
     global GLOBAL_PORTFOLIO_DYNAMICS
     
-    # Jika request pertama kali masuk dan cache kosong, jalankan scan instan sekali agar tidak macet di UI
     if not MARKET_DATA_CACHE:
-        scheduled_job_bridge()
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(execute_one_market_scan())
+        except Exception as e:
+            print(f"Instant scan failed: {e}")
             
     try:
         req = request.json or {}
@@ -433,6 +436,4 @@ def send_manual_alert():
         return jsonify({"status": "error", "message": str(e)}), 400
 
 if __name__ == '__main__':
-    # Eksekusi awal scan saat dijalankan lokal
-    scheduled_job_bridge()
     app.run(host='0.0.0.0', port=5000, debug=False)
