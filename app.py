@@ -1,6 +1,7 @@
 from flask import Flask, render_template, jsonify, request
 import httpx
 import asyncio
+import time
 from threading import Thread
 
 app = Flask(__name__)
@@ -82,7 +83,6 @@ async def get_combined_tickers_data_async(client):
             filtered_list.sort(key=lambda x: x['pure_vol_24h'], reverse=True)
             top_50_symbols = [item['symbol'] for item in filtered_list[:50]]
             
-            # Gabungkan Top 50 dengan koin dinamis yang sedang dipantau oleh browser user
             portfolio_symbols = [f"{coin}USDT" for coin in GLOBAL_PORTFOLIO_DYNAMICS.keys()]
             target_symbols = list(set(top_50_symbols + portfolio_symbols))
             
@@ -258,13 +258,15 @@ async def process_single_coin_pipeline(client, symbol, m_data, last_alerts_state
                     status_rencana_otomatis = "WAIT & SEE"
 
             harga_terformat = f"${live_price:.8f}" if live_price < 1.0 else f"${live_price:.4f}"
+            
+            # Memperbaiki variabel rujukan 'whale' yang typo di kode asli Anda menjadi 'whale_dominance'
             if coin_name not in last_alerts_state or last_alerts_state[coin_name] != fase:
                 if fase in ["VALID BREAKOUT", "INSTITUTIONAL BUY"] and GLOBAL_BTC_STATUS["is_safe"] and vol_spike_ratio >= 2.5:
                     emoji = "👑 BRAND NEW MSB!" if fase == "INSTITUTIONAL BUY" else "🔥 BREAKOUT SPIKE"
                     asyncio.create_task(send_telegram_alert_async(
                         f"{emoji}\n\nCoin: *{coin_name}*\nMarket Structure: `BREAKOUT RESISTANCE`\n"
                         f"Vol vs MA20 Speed: `{vol_spike_ratio:.1f}x` (Req: {required_vol_spike}x)\n"
-                        f"Whale Dominance: `{whale}%`\n"
+                        f"Whale Dominance: `{whale_dominance}%`\n"
                         f"Live Price: `*{harga_terformat}*`"
                     ))
                 last_alerts_state[coin_name] = fase
@@ -315,6 +317,7 @@ async def process_single_coin_pipeline(client, symbol, m_data, last_alerts_state
 async def main_analysis_loop():
     global MARKET_DATA_CACHE, ASYNC_HTTP_CLIENT
     last_alerts_state = {} 
+    last_broadcast_time = 0 # Tracker interval waktu untuk siklus auto-broadcast
     
     async with httpx.AsyncClient() as client:
         ASYNC_HTTP_CLIENT = client
@@ -333,6 +336,41 @@ async def main_analysis_loop():
             
             temp_data.sort(key=lambda x: (x['is_portfolio'], x['skor']), reverse=True)
             MARKET_DATA_CACHE = temp_data
+
+            # ==================== INTEGRASI AUTO BROADCAST 5 MENIT ====================
+            current_time = time.time()
+            if current_time - last_broadcast_time >= 300:
+                # Ambil koin non-portofolio lalu sortir murni berdasarkan momentum_score ('skor') tertinggi
+                scanner_coins = [c for c in temp_data if not c['is_portfolio']]
+                scanner_coins.sort(key=lambda x: x['skor'], reverse=True)
+                top_3_momentum = scanner_coins[:3]
+                
+                if top_3_momentum:
+                    msg = f"⏳ *🟢 QUANTUM AUTOMATIC RADAR REPORT* (5m Loop)\n"
+                    msg += f"Status BTC: *{GLOBAL_BTC_STATUS['reason']}*\n"
+                    msg += f"-----------------------------------------\n\n"
+                    
+                    for i, coin in enumerate(top_3_momentum, 1):
+                        sign = "+" if coin['persen_harga'] >= 0 else ""
+                        harga_fmt = f"${coin['harga']:.8f}" if coin['harga'] < 1.0 else f"${coin['harga']:.4f}"
+                        saran_fmt = f"${coin['saran_entry']:.8f}" if coin['saran_entry'] < 1.0 else f"${coin['saran_entry']:.4f}"
+                        tp_fmt = f"${coin['tp']:.8f}" if coin['tp'] < 1.0 else f"${coin['tp']:.4f}"
+                        
+                        msg += (
+                            f"{i}. *{coin['koin']}/USDT*\n"
+                            f"  ▪️ Price: {harga_fmt} ({sign}{coin['persen_harga']:.2f}%)\n"
+                            f"  ▪️ Vol Speed: {coin['rasio']:.1f}x\n"
+                            f"  ▪️ Whale Dom: {coin['whale']}%\n"
+                            f"  ▪️ Structural: `{coin['fase']}`\n"
+                            f"  🎯 Trigger Entry: {saran_fmt}\n\n"
+                        )
+                    msg += f"💡 _Data dianalisis otomatis menggunakan parameter Kuantum Advanced._"
+                    
+                    # Menggunakan task non-blocking agar perulangan utama tidak tersendat delay network telegram
+                    asyncio.create_task(send_telegram_alert_async(msg))
+                    last_broadcast_time = current_time
+            # ==========================================================================
+
             await asyncio.sleep(4)
 
 def start_async_engine_thread():
@@ -343,13 +381,11 @@ def start_async_engine_thread():
 @app.route('/')
 def index(): return render_template('index.html')
 
-# MENGUBAH ENDPOINT MENJADI POST AGAR DAPAT MENERIMA DATA PORTFOLIO DARI BROWSER USER
 @app.route('/api/data', methods=['POST'])
 def get_data():
     global GLOBAL_PORTFOLIO_DYNAMICS
     try:
         req = request.json or {}
-        # Tangkap data asset yang dikirim dari localStorage browser pengguna
         GLOBAL_PORTFOLIO_DYNAMICS = req.get("portfolio", {})
     except Exception as e:
         print(f"Failed to synchronize dynamic portfolio cache: {e}")
