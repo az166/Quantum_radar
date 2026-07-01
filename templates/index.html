@@ -111,6 +111,16 @@
         let currentTargetCoin = "";
         let globalCachedData = [];
 
+        // PERBAIKAN: Fungsi untuk membuat / mengambil Device ID unik untuk isolasi cache server
+        function getOrCreateDeviceID() {
+            let id = localStorage.getItem('quantum_device_id');
+            if (!id) {
+                id = 'dev_' + Math.random().toString(36).substring(2, 15) + '_' + Date.now();
+                localStorage.setItem('quantum_device_id', id);
+            }
+            return id;
+        }
+
         function getLocalPortfolio() {
             const data = localStorage.getItem('quantum_portfolio');
             return data ? JSON.parse(data) : {};
@@ -221,7 +231,6 @@
             const tbody = document.getElementById('market-rows');
             const searchQuery = document.getElementById('search-input').value.trim().toUpperCase();
             
-            // SECURITY CHECK: Mencegah crash halaman saat backend baru melakukan loop analisa awal
             if (!coins || !Array.isArray(coins) || coins.length === 0) {
                 tbody.innerHTML = `<tr><td colspan="7" class="p-8 text-center text-gray-500 font-mono animate-pulse">⏳ Waiting for Market Engine Data from Server...</td></tr>`;
                 return;
@@ -345,10 +354,17 @@
                     saveLocalPortfolio(currentLocalPortfolio);
                 }
                 
+                // PERBAIKAN: Ambil token ID unik browser saat ini
+                const currentDeviceId = getOrCreateDeviceID();
+                
                 const response = await fetch('/api/data', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ portfolio: currentLocalPortfolio })
+                    // PERBAIKAN: Kirimkan device_id bersama dengan payload data portfolio
+                    body: JSON.stringify({ 
+                        device_id: currentDeviceId,
+                        portfolio: currentLocalPortfolio 
+                    })
                 });
                 
                 if (!response.ok) {
