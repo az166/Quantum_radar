@@ -9,7 +9,6 @@ app = Flask(__name__)
 MARKET_DATA_CACHE = []
 GLOBAL_PORTFOLIO_DYNAMICS = {}
 LAST_ALERTS_STATE = {}
-LAST_BROADCAST_TIME = 0
 ENGINE_INITIALIZED = False
 
 # ==================== TELEGRAM BOT CONFIGURATION ====================
@@ -253,7 +252,7 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
                 elif fase == "OVERBOUGHT PEAK":
                     status_rencana_otomatis = "TAKE PROFIT"
                 else:
-                    status_rencana_otomatis = "WAIT & SEE"
+                    status_rencate_otomatis = "WAIT & SEE"
 
             harga_terformat = f"${live_price:.8f}" if live_price < 1.0 else f"${live_price:.4f}"
             
@@ -312,7 +311,7 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
             return None
 
 async def execute_one_market_scan():
-    global MARKET_DATA_CACHE, LAST_BROADCAST_TIME
+    global MARKET_DATA_CACHE
     
     async with httpx.AsyncClient() as client:
         semaphore = asyncio.Semaphore(4)
@@ -328,35 +327,6 @@ async def execute_one_market_scan():
         
         temp_data.sort(key=lambda x: (x['is_portfolio'], x['skor']), reverse=True)
         MARKET_DATA_CACHE = temp_data
-
-        current_time = time.time()
-        if current_time - LAST_BROADCAST_TIME >= 300:
-            scanner_coins = [c for c in temp_data if not c['is_portfolio']]
-            scanner_coins.sort(key=lambda x: x['skor'], reverse=True)
-            top_3_momentum = scanner_coins[:3]
-            
-            if top_3_momentum:
-                msg = f"⏳ *🟢 QUANTUM AUTOMATIC RADAR REPORT* (5m Loop)\n"
-                msg += f"Status BTC: *{GLOBAL_BTC_STATUS['reason']}*\n"
-                msg += f"-----------------------------------------\n\n"
-                
-                for i, coin in enumerate(top_3_momentum, 1):
-                    sign = "+" if coin['persen_harga'] >= 0 else ""
-                    harga_fmt = f"${coin['harga']:.8f}" if coin['harga'] < 1.0 else f"${coin['harga']:.4f}"
-                    saran_fmt = f"${coin['saran_entry']:.8f}" if coin['saran_entry'] < 1.0 else f"${coin['saran_entry']:.4f}"
-                    
-                    msg += (
-                        f"{i}. *{coin['koin']}/USDT*\n"
-                        f"  ▪️ Price: {harga_fmt} ({sign}{coin['persen_harga']:.2f}%)\n"
-                        f"  ▪️ Vol Speed: {coin['rasio']:.1f}x\n"
-                        f"  ▪️ Whale Dom: {coin['whale']}%\n"
-                        f"  ▪️ Structural: `{coin['fase']}`\n"
-                        f"  🎯 Trigger Entry: {saran_fmt}\n\n"
-                    )
-                msg += f"💡 _Data dianalisis otomatis menggunakan parameter Kuantum Advanced._"
-                
-                send_telegram_alert_sync(msg)
-                LAST_BROADCAST_TIME = current_time
 
 def run_loop_in_bg():
     while True:
