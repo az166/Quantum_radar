@@ -2,13 +2,13 @@ from flask import Flask, render_template, jsonify, request
 import httpx
 import asyncio
 import time
-from threading import Thread
 
 app = Flask(__name__)
 
 MARKET_DATA_CACHE = []
-GLOBAL_PORTFOLIO_DYNAMICS = {}  # Disinkronkan dinamis tiap request dari browser
-LAST_ALERTS_STATE = {}          # Dipindahkan ke global agar tidak mengunci thread asynchronous
+GLOBAL_PORTFOLIO_DYNAMICS = {}
+LAST_ALERTS_STATE = {}
+ENGINE_INITIALIZED = False  # Flag untuk mencegah loop ganda
 
 # ==================== TELEGRAM BOT CONFIGURATION ====================
 TELEGRAM_TOKEN = "8979605471:AAGToVU4-bkZIPi9DeqhE8CCNYIp-bM3Bvs"
@@ -32,11 +32,16 @@ async def send_telegram_alert_async(message):
         return False
 
 def send_telegram_alert_sync_bridge(message):
-    loop = asyncio.new_event_loop()
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
     try:
         return loop.run_until_complete(send_telegram_alert_async(message))
-    finally:
-        loop.close()
+    except Exception as e:
+        print(f"Bridge error: {e}")
+        return False
 
 async def check_bitcoin_circuit_breaker(client):
     global GLOBAL_BTC_STATUS
@@ -262,7 +267,6 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
 
             harga_terformat = f"${live_price:.8f}" if live_price < 1.0 else f"${live_price:.4f}"
             
-            # Memperbaiki pembacaan alert menggunakan scope global tracker agar thread-safe
             if coin_name not in LAST_ALERTS_STATE or LAST_ALERTS_STATE[coin_name] != fase:
                 if fase in ["VALID BREAKOUT", "INSTITUTIONAL BUY"] and GLOBAL_BTC_STATUS["is_safe"] and vol_spike_ratio >= 2.5:
                     emoji = "👑 BRAND NEW MSB!" if fase == "INSTITUTIONAL BUY" else "🔥 BREAKOUT SPIKE"
@@ -317,76 +321,108 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
             print(f"Error processing {symbol}: {e}")
             return None
 
-async def main_analysis_loop():
-    global MARKET_DATA_CACHE, ASYNC_HTTP_CLIENT
-    last_broadcast_time = 0
+async def execute_one_market_scan():
+    global MARKET_DATA_CACHE, ASYNC_HTTP_CLIENT, LAST_BROADCAST_TIME
     
-    async with httpx.AsyncClient() as client:
-        ASYNC_HTTP_CLIENT = client
-        # Menurunkan tingkat konkurensi dari 12 menjadi 5 agar server gratis tidak tersendat rate-limit
-        semaphore = asyncio.Semaphore(5) 
+    # Inisialisasi HTTP client jika belum ada
+    if ASYNC_HTTP_CLIENT is None:
+        ASYNC_HTTP_CLIENT = httpx.AsyncClient()
         
-        while True:
-            try:
-                await check_bitcoin_circuit_breaker(client)
-                ticker_master_data = await get_combined_tickers_data_async(client)
-                if not ticker_master_data:
-                    await asyncio.sleep(5)
-                    continue
+    semaphore = asyncio.Semaphore(4) # Aman untuk CPU server gratisan
+    await check_bitcoin_circuit_breaker(ASYNC_HTTP_CLIENT)
+    ticker_master_data = await get_combined_tickers_data_async(ASYNC_HTTP_CLIENT)
+    
+    if not ticker_master_data:
+        return
+        
+    tasks = [process_single_coin_pipeline(ASYNC_HTTP_CLIENT, symbol, m_data, GLOBAL_PORTFOLIO_DYNAMICS, semaphore) for symbol, m_data in ticker_master_data.items()]
+    results = await asyncio.gather(*tasks)
+    temp_data = [r for r in results if r is not None]
+    
+    temp_data.sort(key=lambda x: (x['is_portfolio'], x['skor']), reverse=True)
+    MARKET_DATA_CACHE = temp_data
+
+    # Logika Auto Broadcast 5 Menit Terintegrasi Langsung
+    current_time = time.time()
+    if current_time - LAST_BROADCAST_TIME >= 300:
+        scanner_coins = [c for c in temp_data if not c['is_portfolio']]
+        scanner_coins.sort(key=lambda x: x['skor'], reverse=True)
+        top_3_momentum = scanner_coins[:3]
+        
+        if top_3_momentum:
+            msg = f"⏳ *🟢 QUANTUM AUTOMATIC RADAR REPORT* (5m Loop)\n"
+            msg += f"Status BTC: *{GLOBAL_BTC_STATUS['reason']}*\n"
+            msg += f"-----------------------------------------\n\n"
+            
+            for i, coin in enumerate(top_3_momentum, 1):
+                sign = "+" if coin['persen_harga'] >= 0 else ""
+                harga_fmt = f"${coin['harga']:.8f}" if coin['harga'] < 1.0 else f"${coin['harga']:.4f}"
+                saran_fmt = f"${coin['saran_entry']:.8f}" if coin['saran_entry'] < 1.0 else f"${coin['saran_entry']:.4f}"
                 
-                tasks = [process_single_coin_pipeline(client, symbol, m_data, GLOBAL_PORTFOLIO_DYNAMICS, semaphore) for symbol, m_data in ticker_master_data.items()]
-                results = await asyncio.gather(*tasks)
-                temp_data = [r for r in results if r is not None]
-                
-                temp_data.sort(key=lambda x: (x['is_portfolio'], x['skor']), reverse=True)
-                MARKET_DATA_CACHE = temp_data
+                msg += (
+                    f"{i}. *{coin['koin']}/USDT*\n"
+                    f"  ▪️ Price: {harga_fmt} ({sign}{coin['persen_harga']:.2f}%)\n"
+                    f"  ▪️ Vol Speed: {coin['rasio']:.1f}x\n"
+                    f"  ▪️ Whale Dom: {coin['whale']}%\n"
+                    f"  ▪️ Structural: `{coin['fase']}`\n"
+                    f"  🎯 Trigger Entry: {saran_fmt}\n\n"
+                )
+            msg += f"💡 _Data dianalisis otomatis menggunakan parameter Kuantum Advanced._"
+            
+            asyncio.create_task(send_telegram_alert_async(msg))
+            LAST_BROADCAST_TIME = current_time
 
-                # ==================== INTEGRASI AUTO BROADCAST 5 MENIT ====================
-                current_time = time.time()
-                if current_time - last_broadcast_time >= 300:
-                    scanner_coins = [c for c in temp_data if not c['is_portfolio']]
-                    scanner_coins.sort(key=lambda x: x['skor'], reverse=True)
-                    top_3_momentum = scanner_coins[:3]
-                    
-                    if top_3_momentum:
-                        msg = f"⏳ *🟢 QUANTUM AUTOMATIC RADAR REPORT* (5m Loop)\n"
-                        msg += f"Status BTC: *{GLOBAL_BTC_STATUS['reason']}*\n"
-                        msg += f"-----------------------------------------\n\n"
-                        
-                        for i, coin in enumerate(top_3_momentum, 1):
-                            sign = "+" if coin['persen_harga'] >= 0 else ""
-                            harga_fmt = f"${coin['harga']:.8f}" if coin['harga'] < 1.0 else f"${coin['harga']:.4f}"
-                            saran_fmt = f"${coin['saran_entry']:.8f}" if coin['saran_entry'] < 1.0 else f"${coin['saran_entry']:.4f}"
-                            
-                            msg += (
-                                f"{i}. *{coin['koin']}/USDT*\n"
-                                f"  ▪️ Price: {harga_fmt} ({sign}{coin['persen_harga']:.2f}%)\n"
-                                f"  ▪️ Vol Speed: {coin['rasio']:.1f}x\n"
-                                f"  ▪️ Whale Dom: {coin['whale']}%\n"
-                                f"  ▪️ Structural: `{coin['fase']}`\n"
-                                f"  🎯 Trigger Entry: {saran_fmt}\n\n"
-                            )
-                        msg += f"💡 _Data dianalisis otomatis menggunakan parameter Kuantum Advanced._"
-                        
-                        asyncio.create_task(send_telegram_alert_async(msg))
-                        last_broadcast_time = current_time
-                # ==========================================================================
-            except Exception as e:
-                print(f"Error inside main loop iteration: {e}")
+# Tracker waktu siaran ditaruh di level global modul
+LAST_BROADCAST_TIME = 0
 
-            await asyncio.sleep(5)
+async def permanent_background_loop():
+    while True:
+        try:
+            await execute_one_market_scan()
+        except Exception as e:
+            print(f"Loop scan error: {e}")
+        await asyncio.sleep(12) # Interval refresh internal data
 
-def start_async_engine_thread():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(main_analysis_loop())
+@app.before_request
+def trigger_engine_startup():
+    global ENGINE_INITIALIZED
+    if not ENGINE_INITIALIZED:
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+        if loop.is_running():
+            loop.create_task(permanent_background_loop())
+        else:
+            # Skenario cadangan jika dijalankan tanpa ASGI server eksternal
+            def run_loop_in_bg():
+                new_loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(new_loop)
+                new_loop.run_until_complete(permanent_background_loop())
+            Thread(target=run_loop_in_bg, daemon=True).start()
+            
+        ENGINE_INITIALIZED = True
 
 @app.route('/')
-def index(): return render_template('index.html')
+def index(): 
+    return render_template('index.html')
 
 @app.route('/api/data', methods=['POST'])
 def get_data():
     global GLOBAL_PORTFOLIO_DYNAMICS
+    
+    # JIKA CACHE MASIH KOSONG, PAKSA SCAN SATU KALI INSTAN (Mencegah Macet Waiting)
+    if not MARKET_DATA_CACHE:
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        if not loop.is_running():
+            loop.run_until_complete(execute_one_market_scan())
+            
     try:
         req = request.json or {}
         GLOBAL_PORTFOLIO_DYNAMICS = req.get("portfolio", {})
@@ -432,5 +468,11 @@ def send_manual_alert():
         return jsonify({"status": "error", "message": str(e)}), 400
 
 if __name__ == '__main__':
-    Thread(target=start_async_engine_thread, daemon=True).start()
+    # Mode lokal fallback
+    try:
+        l = asyncio.get_event_loop()
+        l.create_task(permanent_background_loop())
+        ENGINE_INITIALIZED = True
+    except:
+        pass
     app.run(host='0.0.0.0', port=5000, debug=False)
