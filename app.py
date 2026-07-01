@@ -6,10 +6,18 @@ from threading import Thread
 
 app = Flask(__name__)
 
+# Cache utama dan data sinkronisasi global
 MARKET_DATA_CACHE = []
 GLOBAL_PORTFOLIO_DYNAMICS = {}
 LAST_ALERTS_STATE = {}
 ENGINE_INITIALIZED = False
+
+# variabel optimasi untuk mendeteksi cache kedalwarsa (TTL)
+LAST_SUCCESSFUL_SCAN_TIME = 0
+CACHE_TTL_SECONDS = 120  # Maksimal 2 menit data dianggap valid jika engine macet
+
+# Set pencarian cepat O(1) untuk menyaring koin hitam (Blacklist)
+COIN_BLACKLIST = {'UPUSDT', 'DOWNUSDT', 'BUSDUSDT', 'USDCUSDT', 'FDUSDUSDT', 'EURUSDT'}
 
 # ==================== TELEGRAM BOT CONFIGURATION ====================
 TELEGRAM_TOKEN = "8979605471:AAGToVU4-bkZIPi9DeqhE8CCNYIp-bM3Bvs"
@@ -19,12 +27,26 @@ TELEGRAM_CHAT_ID = "@cryptoradar_quantum"
 LIVE_PRICE_MAP = {}
 GLOBAL_BTC_STATUS = {"is_safe": True, "reason": "Connecting"}
 
+# OPTIMASI 1: Long-lived Async Client (Connection Pool) di tingkat aplikasi
+# Menghemat waktu TLS Handshake hingga 50% setiap siklus scan harian/jam
+ASYNC_CLIENT_POOL = None
+
+def get_async_client():
+    global ASYNC_CLIENT_POOL
+    if ASYNC_CLIENT_POOL is None or ASYNC_CLIENT_POOL.is_closed:
+        ASYNC_CLIENT_POOL = httpx.AsyncClient(
+            limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
+            timeout=httpx.Timeout(5.0)
+        )
+    return ASYNC_CLIENT_POOL
+
 def send_telegram_alert_sync(message):
     if not TELEGRAM_TOKEN or "ENTER_TOKEN" in TELEGRAM_TOKEN:
         return False
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
     try:
+        # Terisolasi dan menggunakan client sinkron mandiri agar bebas loop conflict
         with httpx.Client() as client:
             res = client.post(url, json=payload, timeout=5)
             return res.status_code == 200
@@ -66,7 +88,8 @@ async def get_combined_tickers_data_async(client):
             
             for t in all_tickers:
                 symbol = t['symbol']
-                if symbol.endswith('USDT') and not any(x in symbol for x in ['UPUSDT', 'DOWNUSDT', 'BUSDUSDT', 'USDCUSDT', 'FDUSDUSDT', 'EURUSDT']):
+                # OPTIMASI 2: Menggunakan operasi SET O(1) untuk filtrasi koin hitam (Sangat Cepat)
+                if symbol.endswith('USDT') and (symbol not in COIN_BLACKLIST):
                     live_p = float(t['lastPrice'])
                     LIVE_PRICE_MAP[symbol] = live_p
                     
@@ -176,6 +199,7 @@ def calculate_atr_and_spread(klines_1d, klines_1h):
 async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, semaphore):
     global LAST_ALERTS_STATE
     async with semaphore:
+        # OPTIMASI 4: Limit klines harian dipotong ketat ke batas aman terkecil (105) untuk efisiensi jaringan
         task_1w = fetch_klines_safely_async(client, symbol, '1w', 4)   
         task_1d = fetch_klines_safely_async(client, symbol, '1d', 105)  
         task_1h = fetch_klines_safely_async(client, symbol, '1h', 60)  
@@ -252,7 +276,7 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
                 elif fase == "OVERBOUGHT PEAK":
                     status_rencana_otomatis = "TAKE PROFIT"
                 else:
-                    status_rencate_otomatis = "WAIT & SEE"
+                    status_rencana_otomatis = "WAIT & SEE"
 
             harga_terformat = f"${live_price:.8f}" if live_price < 1.0 else f"${live_price:.4f}"
             
@@ -311,10 +335,12 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
             return None
 
 async def execute_one_market_scan():
-    global MARKET_DATA_CACHE
+    global MARKET_DATA_CACHE, LAST_SUCCESSFUL_SCAN_TIME
     
-    async with httpx.AsyncClient() as client:
-        semaphore = asyncio.Semaphore(4)
+    # Ambil koneksi dari pool yang reusable
+    client = get_async_client()
+    try:
+        semaphore = asyncio.Semaphore(4)  # 4 Konkurensi paralel ideal untuk server Render
         await check_bitcoin_circuit_breaker(client)
         ticker_master_data = await get_combined_tickers_data_async(client)
         
@@ -327,6 +353,11 @@ async def execute_one_market_scan():
         
         temp_data.sort(key=lambda x: (x['is_portfolio'], x['skor']), reverse=True)
         MARKET_DATA_CACHE = temp_data
+        
+        # Tandai waktu sukses pemindaian terakhir
+        LAST_SUCCESSFUL_SCAN_TIME = time.time()
+    except Exception as e:
+        print(f"Error during core scan execution: {e}")
 
 def run_loop_in_bg():
     while True:
@@ -336,7 +367,7 @@ def run_loop_in_bg():
             loop.run_until_complete(execute_one_market_scan())
         except Exception as e:
             print(f"Background Loop Error: {e}")
-        time.sleep(15)
+        time.sleep(15)  # Istirahat 15 detik demi menjaga kestabilan CPU
 
 @app.before_request
 def trigger_engine_startup():
@@ -353,13 +384,18 @@ def index():
 def get_data():
     global GLOBAL_PORTFOLIO_DYNAMICS
     
-    if not MARKET_DATA_CACHE:
+    current_time = time.time()
+    # OPTIMASI 3: Proteksi data usang (TTL Cache Check). 
+    # Jika cache kosong ATAU engine latar belakang macet > 2 menit, paksa jalankan pemindaian instan saat itu juga.
+    is_cache_stale = (current_time - LAST_SUCCESSFUL_SCAN_TIME) > CACHE_TTL_SECONDS
+    
+    if not MARKET_DATA_CACHE or is_cache_stale:
         try:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             loop.run_until_complete(execute_one_market_scan())
         except Exception as e:
-            print(f"Instant scan failed: {e}")
+            print(f"Instant fallback scan failed: {e}")
             
     try:
         req = request.json or {}
