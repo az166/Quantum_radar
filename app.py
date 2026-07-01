@@ -8,6 +8,7 @@ app = Flask(__name__)
 
 MARKET_DATA_CACHE = []
 GLOBAL_PORTFOLIO_DYNAMICS = {}  # Disinkronkan dinamis tiap request dari browser
+LAST_ALERTS_STATE = {}          # Dipindahkan ke global agar tidak mengunci thread asynchronous
 
 # ==================== TELEGRAM BOT CONFIGURATION ====================
 TELEGRAM_TOKEN = "8979605471:AAGToVU4-bkZIPi9DeqhE8CCNYIp-bM3Bvs"
@@ -56,7 +57,8 @@ async def check_bitcoin_circuit_breaker(client):
                 GLOBAL_BTC_STATUS = {"is_safe": False, "reason": "BTC BEARISH (Below MA24)"}
             else:
                 GLOBAL_BTC_STATUS = {"is_safe": True, "reason": "BTC SAFE"}
-    except:
+    except Exception as e:
+        print(f"Error checking BTC status: {e}")
         GLOBAL_BTC_STATUS = {"is_safe": True, "reason": "BTC CHECK DELAYED"}
 
 async def get_combined_tickers_data_async(client):
@@ -177,7 +179,8 @@ def calculate_atr_and_spread(klines_1d, klines_1h):
     recent_spreads = [float(k[2]) - float(k[3]) for k in klines_1h[-6:-1]]
     return atr, current_spread / (sum(recent_spreads) / len(recent_spreads) if recent_spreads else 1)
 
-async def process_single_coin_pipeline(client, symbol, m_data, last_alerts_state, user_portfolio, semaphore):
+async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, semaphore):
+    global LAST_ALERTS_STATE
     async with semaphore:
         task_1w = fetch_klines_safely_async(client, symbol, '1w', 4)   
         task_1d = fetch_klines_safely_async(client, symbol, '1d', 105)  
@@ -259,8 +262,8 @@ async def process_single_coin_pipeline(client, symbol, m_data, last_alerts_state
 
             harga_terformat = f"${live_price:.8f}" if live_price < 1.0 else f"${live_price:.4f}"
             
-            # Memperbaiki variabel rujukan 'whale' yang typo di kode asli Anda menjadi 'whale_dominance'
-            if coin_name not in last_alerts_state or last_alerts_state[coin_name] != fase:
+            # Memperbaiki pembacaan alert menggunakan scope global tracker agar thread-safe
+            if coin_name not in LAST_ALERTS_STATE or LAST_ALERTS_STATE[coin_name] != fase:
                 if fase in ["VALID BREAKOUT", "INSTITUTIONAL BUY"] and GLOBAL_BTC_STATUS["is_safe"] and vol_spike_ratio >= 2.5:
                     emoji = "👑 BRAND NEW MSB!" if fase == "INSTITUTIONAL BUY" else "🔥 BREAKOUT SPIKE"
                     asyncio.create_task(send_telegram_alert_async(
@@ -269,7 +272,7 @@ async def process_single_coin_pipeline(client, symbol, m_data, last_alerts_state
                         f"Whale Dominance: `{whale_dominance}%`\n"
                         f"Live Price: `*{harga_terformat}*`"
                     ))
-                last_alerts_state[coin_name] = fase
+                LAST_ALERTS_STATE[coin_name] = fase
 
             coin_p_data = user_portfolio.get(coin_name, {})
             entry_price = coin_p_data.get("costPrice", 0.0)
@@ -316,62 +319,62 @@ async def process_single_coin_pipeline(client, symbol, m_data, last_alerts_state
 
 async def main_analysis_loop():
     global MARKET_DATA_CACHE, ASYNC_HTTP_CLIENT
-    last_alerts_state = {} 
-    last_broadcast_time = 0 # Tracker interval waktu untuk siklus auto-broadcast
+    last_broadcast_time = 0
     
     async with httpx.AsyncClient() as client:
         ASYNC_HTTP_CLIENT = client
-        semaphore = asyncio.Semaphore(12) 
+        # Menurunkan tingkat konkurensi dari 12 menjadi 5 agar server gratis tidak tersendat rate-limit
+        semaphore = asyncio.Semaphore(5) 
         
         while True:
-            await check_bitcoin_circuit_breaker(client)
-            ticker_master_data = await get_combined_tickers_data_async(client)
-            if not ticker_master_data:
-                await asyncio.sleep(4)
-                continue
-            
-            tasks = [process_single_coin_pipeline(client, symbol, m_data, last_alerts_state, GLOBAL_PORTFOLIO_DYNAMICS, semaphore) for symbol, m_data in ticker_master_data.items()]
-            results = await asyncio.gather(*tasks)
-            temp_data = [r for r in results if r is not None]
-            
-            temp_data.sort(key=lambda x: (x['is_portfolio'], x['skor']), reverse=True)
-            MARKET_DATA_CACHE = temp_data
-
-            # ==================== INTEGRASI AUTO BROADCAST 5 MENIT ====================
-            current_time = time.time()
-            if current_time - last_broadcast_time >= 300:
-                # Ambil koin non-portofolio lalu sortir murni berdasarkan momentum_score ('skor') tertinggi
-                scanner_coins = [c for c in temp_data if not c['is_portfolio']]
-                scanner_coins.sort(key=lambda x: x['skor'], reverse=True)
-                top_3_momentum = scanner_coins[:3]
+            try:
+                await check_bitcoin_circuit_breaker(client)
+                ticker_master_data = await get_combined_tickers_data_async(client)
+                if not ticker_master_data:
+                    await asyncio.sleep(5)
+                    continue
                 
-                if top_3_momentum:
-                    msg = f"⏳ *🟢 QUANTUM AUTOMATIC RADAR REPORT* (5m Loop)\n"
-                    msg += f"Status BTC: *{GLOBAL_BTC_STATUS['reason']}*\n"
-                    msg += f"-----------------------------------------\n\n"
-                    
-                    for i, coin in enumerate(top_3_momentum, 1):
-                        sign = "+" if coin['persen_harga'] >= 0 else ""
-                        harga_fmt = f"${coin['harga']:.8f}" if coin['harga'] < 1.0 else f"${coin['harga']:.4f}"
-                        saran_fmt = f"${coin['saran_entry']:.8f}" if coin['saran_entry'] < 1.0 else f"${coin['saran_entry']:.4f}"
-                        tp_fmt = f"${coin['tp']:.8f}" if coin['tp'] < 1.0 else f"${coin['tp']:.4f}"
-                        
-                        msg += (
-                            f"{i}. *{coin['koin']}/USDT*\n"
-                            f"  ▪️ Price: {harga_fmt} ({sign}{coin['persen_harga']:.2f}%)\n"
-                            f"  ▪️ Vol Speed: {coin['rasio']:.1f}x\n"
-                            f"  ▪️ Whale Dom: {coin['whale']}%\n"
-                            f"  ▪️ Structural: `{coin['fase']}`\n"
-                            f"  🎯 Trigger Entry: {saran_fmt}\n\n"
-                        )
-                    msg += f"💡 _Data dianalisis otomatis menggunakan parameter Kuantum Advanced._"
-                    
-                    # Menggunakan task non-blocking agar perulangan utama tidak tersendat delay network telegram
-                    asyncio.create_task(send_telegram_alert_async(msg))
-                    last_broadcast_time = current_time
-            # ==========================================================================
+                tasks = [process_single_coin_pipeline(client, symbol, m_data, GLOBAL_PORTFOLIO_DYNAMICS, semaphore) for symbol, m_data in ticker_master_data.items()]
+                results = await asyncio.gather(*tasks)
+                temp_data = [r for r in results if r is not None]
+                
+                temp_data.sort(key=lambda x: (x['is_portfolio'], x['skor']), reverse=True)
+                MARKET_DATA_CACHE = temp_data
 
-            await asyncio.sleep(4)
+                # ==================== INTEGRASI AUTO BROADCAST 5 MENIT ====================
+                current_time = time.time()
+                if current_time - last_broadcast_time >= 300:
+                    scanner_coins = [c for c in temp_data if not c['is_portfolio']]
+                    scanner_coins.sort(key=lambda x: x['skor'], reverse=True)
+                    top_3_momentum = scanner_coins[:3]
+                    
+                    if top_3_momentum:
+                        msg = f"⏳ *🟢 QUANTUM AUTOMATIC RADAR REPORT* (5m Loop)\n"
+                        msg += f"Status BTC: *{GLOBAL_BTC_STATUS['reason']}*\n"
+                        msg += f"-----------------------------------------\n\n"
+                        
+                        for i, coin in enumerate(top_3_momentum, 1):
+                            sign = "+" if coin['persen_harga'] >= 0 else ""
+                            harga_fmt = f"${coin['harga']:.8f}" if coin['harga'] < 1.0 else f"${coin['harga']:.4f}"
+                            saran_fmt = f"${coin['saran_entry']:.8f}" if coin['saran_entry'] < 1.0 else f"${coin['saran_entry']:.4f}"
+                            
+                            msg += (
+                                f"{i}. *{coin['koin']}/USDT*\n"
+                                f"  ▪️ Price: {harga_fmt} ({sign}{coin['persen_harga']:.2f}%)\n"
+                                f"  ▪️ Vol Speed: {coin['rasio']:.1f}x\n"
+                                f"  ▪️ Whale Dom: {coin['whale']}%\n"
+                                f"  ▪️ Structural: `{coin['fase']}`\n"
+                                f"  🎯 Trigger Entry: {saran_fmt}\n\n"
+                            )
+                        msg += f"💡 _Data dianalisis otomatis menggunakan parameter Kuantum Advanced._"
+                        
+                        asyncio.create_task(send_telegram_alert_async(msg))
+                        last_broadcast_time = current_time
+                # ==========================================================================
+            except Exception as e:
+                print(f"Error inside main loop iteration: {e}")
+
+            await asyncio.sleep(5)
 
 def start_async_engine_thread():
     loop = asyncio.new_event_loop()
