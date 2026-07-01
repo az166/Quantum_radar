@@ -8,7 +8,6 @@ app = Flask(__name__)
 
 # Cache utama dan data sinkronisasi global
 MARKET_DATA_CACHE = []
-GLOBAL_PORTFOLIO_DYNAMICS = {}
 LAST_ALERTS_STATE = {}
 ENGINE_INITIALIZED = False
 
@@ -27,8 +26,10 @@ TELEGRAM_CHAT_ID = "@cryptoradar_quantum"
 LIVE_PRICE_MAP = {}
 GLOBAL_BTC_STATUS = {"is_safe": True, "reason": "Connecting"}
 
-# OPTIMASI 1: Long-lived Async Client (Connection Pool) di tingkat aplikasi
-# Menghemat waktu TLS Handshake hingga 50% setiap siklus scan harian/jam
+# Mengubah struktur menjadi nested dictionary untuk mendukung isolasi multi-device
+# Format data: { "device_id_1": {"SOL": {...}}, "device_id_2": {"BTC": {...}} }
+GLOBAL_PORTFOLIO_DYNAMICS = {} 
+
 ASYNC_CLIENT_POOL = None
 
 def get_async_client():
@@ -46,7 +47,6 @@ def send_telegram_alert_sync(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
     try:
-        # Terisolasi dan menggunakan client sinkron mandiri agar bebas loop conflict
         with httpx.Client() as client:
             res = client.post(url, json=payload, timeout=5)
             return res.status_code == 200
@@ -88,7 +88,6 @@ async def get_combined_tickers_data_async(client):
             
             for t in all_tickers:
                 symbol = t['symbol']
-                # OPTIMASI 2: Menggunakan operasi SET O(1) untuk filtrasi koin hitam (Sangat Cepat)
                 if symbol.endswith('USDT') and (symbol not in COIN_BLACKLIST):
                     live_p = float(t['lastPrice'])
                     LIVE_PRICE_MAP[symbol] = live_p
@@ -102,7 +101,12 @@ async def get_combined_tickers_data_async(client):
             filtered_list.sort(key=lambda x: x['pure_vol_24h'], reverse=True)
             top_50_symbols = [item['symbol'] for item in filtered_list[:50]]
             
-            portfolio_symbols = [f"{coin}USDT" for coin in GLOBAL_PORTFOLIO_DYNAMICS.keys()]
+            # PERBAIKAN: Menggabungkan seluruh data koin dari semua device terdaftar tanpa bentrok
+            portfolio_symbols = []
+            for dev_id, proto_data in GLOBAL_PORTFOLIO_DYNAMICS.items():
+                if isinstance(proto_data, dict):
+                    portfolio_symbols.extend([f"{coin}USDT" for coin in proto_data.keys()])
+                
             target_symbols = list(set(top_50_symbols + portfolio_symbols))
             
             for item in filtered_list:
@@ -199,7 +203,6 @@ def calculate_atr_and_spread(klines_1d, klines_1h):
 async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, semaphore):
     global LAST_ALERTS_STATE
     async with semaphore:
-        # OPTIMASI 4: Limit klines harian dipotong ketat ke batas aman terkecil (105) untuk efisiensi jaringan
         task_1w = fetch_klines_safely_async(client, symbol, '1w', 4)   
         task_1d = fetch_klines_safely_async(client, symbol, '1d', 105)  
         task_1h = fetch_klines_safely_async(client, symbol, '1h', 60)  
@@ -334,27 +337,31 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
             print(f"Error processing {symbol}: {e}")
             return None
 
-async def execute_one_market_scan():
+async def execute_one_market_scan(target_device_id=None):
     global MARKET_DATA_CACHE, LAST_SUCCESSFUL_SCAN_TIME
     
-    # Ambil koneksi dari pool yang reusable
     client = get_async_client()
     try:
-        semaphore = asyncio.Semaphore(4)  # 4 Konkurensi paralel ideal untuk server Render
+        semaphore = asyncio.Semaphore(4)  
         await check_bitcoin_circuit_breaker(client)
         ticker_master_data = await get_combined_tickers_data_async(client)
         
         if not ticker_master_data:
             return
             
-        tasks = [process_single_coin_pipeline(client, symbol, m_data, GLOBAL_PORTFOLIO_DYNAMICS, semaphore) for symbol, m_data in ticker_master_data.items()]
+        # PERBAIKAN: Gunakan portofolio yang terisolasi dari device pengirim request (jika ada)
+        active_portfolio = {}
+        if target_device_id and target_device_id in GLOBAL_PORTFOLIO_DYNAMICS:
+            active_portfolio = GLOBAL_PORTFOLIO_DYNAMICS[target_device_id]
+            
+        tasks = [process_single_coin_pipeline(client, symbol, m_data, active_portfolio, semaphore) for symbol, m_data in ticker_master_data.items()]
         results = await asyncio.gather(*tasks)
         temp_data = [r for r in results if r is not None]
         
+        # PERBAIKAN: Untuk global cache loop, urutkan data secara modular aman
         temp_data.sort(key=lambda x: (x['is_portfolio'], x['skor']), reverse=True)
         MARKET_DATA_CACHE = temp_data
         
-        # Tandai waktu sukses pemindaian terakhir
         LAST_SUCCESSFUL_SCAN_TIME = time.time()
     except Exception as e:
         print(f"Error during core scan execution: {e}")
@@ -367,7 +374,7 @@ def run_loop_in_bg():
             loop.run_until_complete(execute_one_market_scan())
         except Exception as e:
             print(f"Background Loop Error: {e}")
-        time.sleep(15)  # Istirahat 15 detik demi menjaga kestabilan CPU
+        time.sleep(15)  
 
 @app.before_request
 def trigger_engine_startup():
@@ -385,23 +392,71 @@ def get_data():
     global GLOBAL_PORTFOLIO_DYNAMICS
     
     current_time = time.time()
-    # OPTIMASI 3: Proteksi data usang (TTL Cache Check). 
-    # Jika cache kosong ATAU engine latar belakang macet > 2 menit, paksa jalankan pemindaian instan saat itu juga.
     is_cache_stale = (current_time - LAST_SUCCESSFUL_SCAN_TIME) > CACHE_TTL_SECONDS
     
+    req = request.json or {}
+    
+    # PERBAIKAN: Ambil Device ID unik dari payload kiriman JavaScript frontend
+    device_id = req.get("device_id", "default_guest_device")
+    
+    # PERBAIKAN: Amankan sinkronisasi portofolio terbatas hanya untuk KEY milik device tersebut
+    try:
+        GLOBAL_PORTFOLIO_DYNAMICS[device_id] = req.get("portfolio", {})
+    except Exception as e:
+        print(f"Failed to synchronize device dynamic cache: {e}")
+    
+    # Jalankan scan instan dengan membawa parameter isolasi device_id jika cache kedaluwarsa
     if not MARKET_DATA_CACHE or is_cache_stale:
         try:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            loop.run_until_complete(execute_one_market_scan())
+            loop.run_until_complete(execute_one_market_scan(target_device_id=device_id))
         except Exception as e:
             print(f"Instant fallback scan failed: {e}")
-            
-    try:
-        req = request.json or {}
-        GLOBAL_PORTFOLIO_DYNAMICS = req.get("portfolio", {})
-    except Exception as e:
-        print(f"Failed to synchronize dynamic portfolio cache: {e}")
+    else:
+        # PERBAIKAN TIMESTAMPS OVERRIDE: 
+        # Jika menggunakan cache global yang sudah ada, set bendera is_portfolio secara dinamis 
+        # sesuai dengan data perangkat (device_id) yang sedang melakukan request saat ini.
+        active_portfolio = GLOBAL_PORTFOLIO_DYNAMICS.get(device_id, {})
+        for item in MARKET_DATA_CACHE:
+            coin = item["koin"]
+            if coin in active_portfolio:
+                item["is_portfolio"] = True
+                coin_p_data = active_portfolio[coin]
+                item["amount"] = coin_p_data.get("amount", 0.0)
+                item["entry"] = coin_p_data.get("costPrice", 0.0)
+                
+                # Hitung ulang kalkulasi spesifik PNL & kemajuan TP target
+                if item["entry"] > 0 and item["amount"] > 0:
+                    item["tp"] = item["entry"] + (2 * item["atr"])
+                    item["cl"] = item["entry"] - (1.5 * item["atr"])
+                    item["current_value"] = item["amount"] * item["harga"]
+                    initial_val = item["amount"] * item["entry"]
+                    item["pnl_val"] = item["current_value"] - initial_val
+                    item["pnl_pct"] = (item["pnl_val"] / initial_val) * 100
+                    
+                    if item["harga"] >= item["tp"]: item["status_aksi"] = "TAKE PROFIT"
+                    elif item["harga"] <= item["cl"]: item["status_aksi"] = "CUT LOSS"
+                    else: item["status_aksi"] = "WAIT & SEE"
+            else:
+                item["is_portfolio"] = False
+                item["amount"] = 0.0
+                item["entry"] = 0.0
+                item["tp"] = 0.0
+                item["cl"] = 0.0
+                item["pnl_val"] = 0.0
+                item["pnl_pct"] = 0.0
+                item["current_value"] = 0.0
+                if "ENGINE LOCKED" not in item["fase"]:
+                    if item["fase"] in ["INSTITUTIONAL BUY", "VALID BREAKOUT", "EARLY RALLY", "EARLY RALLY (WEAK VOL)"]:
+                        item["status_aksi"] = "BUY STAGE"
+                    elif item["fase"] == "OVERBOUGHT PEAK":
+                        item["status_aksi"] = "TAKE PROFIT"
+                    else:
+                        item["status_aksi"] = "WAIT & SEE"
+                        
+        # Susun ulang prioritas agar baris portofolio milik device ini naik ke posisi paling atas tabel
+        MARKET_DATA_CACHE.sort(key=lambda x: (x['is_portfolio'], x['skor']), reverse=True)
         
     return jsonify({
         "btc_status": GLOBAL_BTC_STATUS,
