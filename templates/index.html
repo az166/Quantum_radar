@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>RADAR QUANTUM MARKET ENGINE V2.6 MULTI-DEVICE</title>
+    <title>RADAR QUANTUM MARKET ENGINE V2.6 LOCALSTORAGE</title>
     <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
     <style>
         body { background-color: #0b0f19; color: #f3f4f6; font-family: 'Segoe UI', system-ui, sans-serif; margin: 0; padding: 0; }
@@ -16,8 +16,9 @@
         <header class="mb-6 flex flex-col md:flex-row justify-between items-start md:items-center p-5 glass-panel rounded-xl gap-4 shadow-2xl">
             <div>
                 <h1 class="text-xl font-black tracking-wider text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-indigo-500">
-                    QUANTUM RADAR v2.6 (ISOLATED DEVICE STORAGE)
+                    QUANTUM RADAR v2.6 (BROWSER STORAGE)
                 </h1>
+                <p class="text-xs text-gray-400 mt-1">Data Asset Disimpan Aman di Cache Browser Kamu</p>
             </div>
             <div class="flex flex-col md:flex-row items-start md:items-center gap-3">
                 <div id="btc-badge" class="text-xs font-mono px-3 py-1.5 rounded-xl border border-gray-800 bg-black/40 text-gray-400">
@@ -72,7 +73,7 @@
                     <tbody id="market-rows" class="divide-y divide-gray-900/60 text-sm font-medium">
                         <tr>
                             <td colspan="7" class="p-8 text-center text-gray-500 font-mono animate-pulse">
-                                Initializing isolated device secure cache integration...
+                                Initializing secure browser cache integration...
                             </td>
                         </tr>
                     </tbody>
@@ -110,39 +111,10 @@
         let currentTargetCoin = "";
         let globalCachedData = [];
 
-        // OPTIMASI: Inisialisasi Device ID Unik untuk pemisahan data antar perangkat
-        function getOrCreateDeviceId() {
-            let deviceId = localStorage.getItem('quantum_device_id');
-            if (!deviceId) {
-                deviceId = 'dev_' + Math.random().toString(36).substring(2, 11) + Date.now().toString(36);
-                localStorage.setItem('quantum_device_id', deviceId);
-            }
-            return deviceId;
-        }
-        const MY_DEVICE_ID = getOrCreateDeviceId();
-
         function getLocalPortfolio() {
             const data = localStorage.getItem('quantum_portfolio');
             return data ? JSON.parse(data) : {};
         }
-async function updateDashboardData() {
-    try {
-        // Pastikan kita mengambil data terbaru dari localStorage
-        let currentLocalPortfolio = getLocalPortfolio();
-        
-        // Kirim data ini ke backend
-        const response = await fetch('/api/data', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ portfolio: currentLocalPortfolio }) // <-- Pastikan ini ada
-        });
-
-        // ... sisa kode
-    } catch (err) {
-        console.error(err);
-    }
-}
-
 
         function saveLocalPortfolio(portfolio) {
             localStorage.setItem('quantum_portfolio', JSON.stringify(portfolio));
@@ -151,8 +123,11 @@ async function updateDashboardData() {
         function formatQuantumPrice(val) {
             if (val === undefined || val === null || isNaN(val)) return "-";
             if (val === 0) return "$0.00";
-            const digits = val < 1.0 ? 8 : 4;
-            return "$" + val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: digits });
+            if (val < 1.0) {
+                return "$" + val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 8 });
+            } else {
+                return "$" + val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 });
+            }
         }
 
         function openModal(coin, amount, entry) {
@@ -168,12 +143,12 @@ async function updateDashboardData() {
         function saveModalDataToCache() {
             const coin = document.getElementById('modal-coin-title').innerText;
             const portfolio = getLocalPortfolio();
-
+            
             portfolio[coin] = {
                 amount: parseFloat(document.getElementById('input-amount').value) || 0,
                 costPrice: parseFloat(document.getElementById('input-entry').value) || 0
             };
-
+            
             saveLocalPortfolio(portfolio);
             closeModal();
             updateDashboardData();
@@ -196,7 +171,7 @@ async function updateDashboardData() {
         function deleteAssetFromCache() {
             const coin = document.getElementById('modal-coin-title').innerText;
             const portfolio = getLocalPortfolio();
-
+            
             if (portfolio[coin] !== undefined) {
                 delete portfolio[coin];
                 saveLocalPortfolio(portfolio);
@@ -219,7 +194,7 @@ async function updateDashboardData() {
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(coinData)
                 });
-
+                
                 if (response.ok) {
                     btn.className = "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 px-2.5 py-1 rounded text-xs font-bold";
                     btn.innerHTML = "✓ Sent";
@@ -245,21 +220,20 @@ async function updateDashboardData() {
         function renderTableRows(coins) {
             const tbody = document.getElementById('market-rows');
             const searchQuery = document.getElementById('search-input').value.trim().toUpperCase();
-
+            
+            // SECURITY CHECK: Mencegah crash halaman saat backend baru melakukan loop analisa awal
             if (!coins || !Array.isArray(coins) || coins.length === 0) {
                 tbody.innerHTML = `<tr><td colspan="7" class="p-8 text-center text-gray-500 font-mono animate-pulse">⏳ Waiting for Market Engine Data from Server...</td></tr>`;
                 return;
             }
 
-            // OPTIMASI: Menggunakan array push & join untuk memangkas memori alokasi rendering string DOM
-            const rowsHtml = [];
-            
+            let rowsHtml = '';
             coins.forEach(coin => {
                 if (searchQuery && !coin.koin.includes(searchQuery)) return;
 
                 const priceChangeClass = coin.persen_harga >= 0 ? 'text-emerald-400' : 'text-rose-400';
                 const isPortfolioStyle = coin.is_portfolio ? 'bg-slate-900/60 border-l-4 border-cyan-500' : '';
-
+                
                 let statusBadgeClass = 'border-gray-800 text-gray-400';
                 if (coin.status_aksi === 'BUY STAGE') statusBadgeClass = 'border-emerald-500/30 text-emerald-400 bg-emerald-950/20';
                 if (coin.status_aksi === 'TAKE PROFIT') statusBadgeClass = 'border-amber-500/30 text-amber-400 bg-amber-950/20';
@@ -277,7 +251,8 @@ async function updateDashboardData() {
 
                 let progressPct = 0;
                 if (coin.tp > coin.entry && coin.harga >= coin.entry) {
-                    progressPct = Math.min(100, ((coin.harga - coin.entry) / (coin.tp - coin.entry)) * 100);
+                    progressPct = ((coin.harga - coin.entry) / (coin.tp - coin.entry)) * 100;
+                    if (progressPct > 100) progressPct = 100;
                 }
 
                 let performanceContent = '';
@@ -319,7 +294,7 @@ async function updateDashboardData() {
                     const isPullbackMode = coin.fase.includes("WEAK VOL");
                     const entryColor = isPullbackMode ? 'text-amber-400 border-amber-900 bg-amber-950/20' : 'text-cyan-400 border-cyan-900 bg-cyan-950/20';
                     const labelPrefix = isPullbackMode ? '🎯 LIMIT THE DIP' : '🚀 BREAKOUT ENTRY';
-
+                    
                     strategicBlock = `
                         <div class="text-gray-500">Cost: <span class="text-gray-600">-</span></div>
                         <div class="font-mono mt-1 text-xs px-2 py-1 border rounded block text-right ${entryColor}">
@@ -329,7 +304,7 @@ async function updateDashboardData() {
                     `;
                 }
 
-                rowsHtml.push(`
+                rowsHtml += `
                     <tr class="${isPortfolioStyle} hover:bg-gray-900/40 transition border-b border-gray-900">
                         <td class="p-4">
                             <div class="flex items-center gap-2">
@@ -356,10 +331,10 @@ async function updateDashboardData() {
                         <td class="p-4">${performanceContent}</td>
                         <td class="p-4 font-mono text-right text-xs">${strategicBlock}</td>
                     </tr>
-                `);
+                `;
             });
-
-            tbody.innerHTML = rowsHtml.join('') || `<tr><td colspan="7" class="p-8 text-center text-gray-500 font-mono">Asset not found...</td></tr>`;
+            
+            tbody.innerHTML = rowsHtml || `<tr><td colspan="7" class="p-8 text-center text-gray-500 font-mono">Asset not found...</td></tr>`;
         }
 
         async function updateDashboardData() {
@@ -369,22 +344,19 @@ async function updateDashboardData() {
                     currentLocalPortfolio = {};
                     saveLocalPortfolio(currentLocalPortfolio);
                 }
-
+                
                 const response = await fetch('/api/data', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ 
-                        device_id: MY_DEVICE_ID, // <-- OPTIMASI: Menyertakan token perangkat unik ke backend Flask
-                        portfolio: currentLocalPortfolio 
-                    })
+                    body: JSON.stringify({ portfolio: currentLocalPortfolio })
                 });
-
+                
                 if (!response.ok) {
                     document.getElementById('sync-status').innerText = 'SERVER ERROR (' + response.status + ')';
                     return;
                 }
                 const rootData = await response.json();
-
+                
                 const btc = rootData.btc_status;
                 const btcBadge = document.getElementById('btc-badge');
                 if(btc && btc.is_safe) {
@@ -397,7 +369,7 @@ async function updateDashboardData() {
 
                 globalCachedData = rootData.market || [];
                 renderTableRows(globalCachedData);
-
+                
                 document.getElementById('sync-status').innerText = 'QUANTUM SECURE BROWSER ENGINE LIVE';
             } catch (err) {
                 console.error(err);
