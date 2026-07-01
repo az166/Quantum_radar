@@ -125,6 +125,24 @@
             const data = localStorage.getItem('quantum_portfolio');
             return data ? JSON.parse(data) : {};
         }
+async function updateDashboardData() {
+    try {
+        // Pastikan kita mengambil data terbaru dari localStorage
+        let currentLocalPortfolio = getLocalPortfolio();
+        
+        // Kirim data ini ke backend
+        const response = await fetch('/api/data', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ portfolio: currentLocalPortfolio }) // <-- Pastikan ini ada
+        });
+
+        // ... sisa kode
+    } catch (err) {
+        console.error(err);
+    }
+}
+
 
         function saveLocalPortfolio(portfolio) {
             localStorage.setItem('quantum_portfolio', JSON.stringify(portfolio));
