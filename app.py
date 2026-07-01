@@ -124,6 +124,12 @@ async def get_combined_tickers_data_async(client):
     except Exception as e:
         print(f"Failed to update master ticker data: {e}")
     return {}
+function saveModalDataToCache() {
+    // ... kode penyimpanan localStorage Anda ...
+    saveLocalPortfolio(portfolio);
+    closeModal();
+    updateDashboardData(); // Panggil ini agar sinkronisasi terjadi seketika
+}
 
 async def fetch_klines_safely_async(client, symbol, interval, limit):
     url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
