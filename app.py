@@ -7,7 +7,7 @@ from threading import Thread
 
 app = Flask(__name__)
 
-# Cache utama untuk menyimpan data analisis pasar global (Bersih dari data user)
+# Cache utama untuk menyimpan data analisis pasar global
 MARKET_DATA_CACHE = []
 LAST_ALERTS_STATE = {}
 ENGINE_INITIALIZED = False
@@ -27,19 +27,18 @@ TELEGRAM_CHAT_ID = "@cryptoradar_quantum"
 LIVE_PRICE_MAP = {}
 GLOBAL_BTC_STATUS = {"is_safe": True, "reason": "Connecting"}
 
-# Struktur data multi-device terisolasi: { "device_id": {"BTC": {"amount": 1, "costPrice": 50000}} }
+# Struktur data multi-device terisolasi
 GLOBAL_PORTFOLIO_DYNAMICS = {} 
 
-ASYNC_CLIENT_POOL = None
-
-def get_async_client():
-    global ASYNC_CLIENT_POOL
-    if ASYNC_CLIENT_POOL is None or ASYNC_CLIENT_POOL.is_closed:
-        ASYNC_CLIENT_POOL = httpx.AsyncClient(
-            limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
-            timeout=httpx.Timeout(5.0)
-        )
-    return ASYNC_CLIENT_POOL
+# Solusi Sinkronisasi Loop: Gunakan satu client per thread secara aman menggunakan loop lokal jika diperlukan
+async def fetch_with_temporary_client(coro_function):
+    """Fungsi helper untuk menjalankan tugas async dengan client terisolasi 
+    agar tidak terjadi bentrokan antar event loop."""
+    async with httpx.AsyncClient(
+        limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
+        timeout=httpx.Timeout(5.0)
+    ) as client:
+        return await coro_function(client)
 
 def send_telegram_alert_sync(message):
     if not TELEGRAM_TOKEN or "ENTER_TOKEN" in TELEGRAM_TOKEN:
@@ -101,7 +100,6 @@ async def get_combined_tickers_data_async(client):
             filtered_list.sort(key=lambda x: x['pure_vol_24h'], reverse=True)
             top_50_symbols = [item['symbol'] for item in filtered_list[:50]]
             
-            # Gabungkan seluruh data koin dari semua device terdaftar untuk dipantau oleh engine latar belakang
             portfolio_symbols = []
             for dev_id, proto_data in GLOBAL_PORTFOLIO_DYNAMICS.items():
                 if isinstance(proto_data, dict):
@@ -311,31 +309,30 @@ async def process_single_coin_pipeline(client, symbol, m_data, semaphore):
             print(f"Error processing {symbol}: {e}")
             return None
 
-async def execute_one_market_scan():
+async def execute_market_scan_core(client):
+    """Menangani pemrosesan murni data scanning bursa pasar bebas."""
     global MARKET_DATA_CACHE, LAST_SUCCESSFUL_SCAN_TIME
-    client = get_async_client()
-    try:
-        semaphore = asyncio.Semaphore(4)  
-        await check_bitcoin_circuit_breaker(client)
-        ticker_master_data = await get_combined_tickers_data_async(client)
+    semaphore = asyncio.Semaphore(4)  
+    await check_bitcoin_circuit_breaker(client)
+    ticker_master_data = await get_combined_tickers_data_async(client)
+    
+    if not ticker_master_data:
+        return
         
-        if not ticker_master_data:
-            return
-            
-        tasks = [process_single_coin_pipeline(client, symbol, m_data, semaphore) for symbol, m_data in ticker_master_data.items()]
-        results = await asyncio.gather(*tasks)
-        
-        MARKET_DATA_CACHE = [r for r in results if r is not None]
-        LAST_SUCCESSFUL_SCAN_TIME = time.time()
-    except Exception as e:
-        print(f"Error during core scan execution: {e}")
+    tasks = [process_single_coin_pipeline(client, symbol, m_data, semaphore) for symbol, m_data in ticker_master_data.items()]
+    results = await asyncio.gather(*tasks)
+    
+    MARKET_DATA_CACHE = [r for r in results if r is not None]
+    LAST_SUCCESSFUL_SCAN_TIME = time.time()
 
 def run_loop_in_bg():
     while True:
         try:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            loop.run_until_complete(execute_one_market_scan())
+            
+            # Memanfaatkan wrapper temporary client terisolasi khusus di thread latar belakang ini
+            loop.run_until_complete(fetch_with_temporary_client(execute_market_scan_core))
         except Exception as e:
             print(f"Background Loop Error: {e}")
         time.sleep(15)  
@@ -366,15 +363,16 @@ def get_data():
     except Exception as e:
         print(f"Failed to synchronize device dynamic cache: {e}")
     
+    # Amankan eksekusi fallback instan agar tidak merusak objek client thread utama
     if not MARKET_DATA_CACHE or is_cache_stale:
         try:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            loop.run_until_complete(execute_one_market_scan())
+            # Solusi: Jalankan fallback dengan client baru yang independen
+            loop.run_until_complete(fetch_with_temporary_client(execute_market_scan_core))
         except Exception as e:
             print(f"Instant fallback scan failed: {e}")
             
-    # ISOLASI: Gunakan copy.deepcopy agar data antar device tidak tercampur
     user_specific_market = copy.deepcopy(MARKET_DATA_CACHE)
     active_portfolio = GLOBAL_PORTFOLIO_DYNAMICS.get(device_id, {})
     
@@ -406,9 +404,6 @@ def get_data():
                     item["pnl_val"] = 0.0
                     item["pnl_pct"] = 0.0
                     
-                # ====================================================================
-                # LOGIKA PLAN STATUS ASSET DINAMIS (MATRIKS JALUR HARGA REAL-TIME)
-                # ====================================================================
                 harga_sekarang = item["harga"]
                 harga_beli = item["entry"]
                 target_tp = item["tp"]
@@ -419,26 +414,23 @@ def get_data():
                 elif harga_sekarang <= target_cl:
                     item["status_aksi"] = "CUT LOSS"
                 elif harga_sekarang > harga_beli:
-                    # Evaluasi progress kenaikan profit menuju target utama TP
                     total_jarak_tp = target_tp - harga_beli
                     jarak_terlewati_tp = harga_sekarang - harga_beli
                     progres_tp_pct = (jarak_terlewati_tp / total_jarak_tp) * 100 if total_jarak_tp > 0 else 0
                     
                     if progres_tp_pct >= 75.0:
-                        item["status_aksi"] = "APPROACHING TP"  # Sangat dekat target TP
+                        item["status_aksi"] = "APPROACHING TP"
                     else:
-                        item["status_aksi"] = "HOLDING (PROFIT)" # Berjalan positif di atas area entry
+                        item["status_aksi"] = "HOLDING (PROFIT)"
                 else:
-                    # Evaluasi kedekatan penurunan harga menuju ambang batas Cut Loss
                     total_jarak_cl = harga_beli - target_cl
                     jarak_tersisa_cl = harga_sekarang - target_cl
                     kedekatan_cl_pct = (jarak_tersisa_cl / total_jarak_cl) * 100 if total_jarak_cl > 0 else 0
                     
                     if kedekatan_cl_pct <= 25.0:
-                        item["status_aksi"] = "NEARING CL"      # Kritis, mendekati batas bawah
+                        item["status_aksi"] = "NEARING CL"
                     else:
-                        item["status_aksi"] = "HOLD (DRAWDOWN)" # Floating loss wajar di dalam zona toleransi
-                # ====================================================================
+                        item["status_aksi"] = "HOLD (DRAWDOWN)"
             else:
                 item["tp"] = 0.0
                 item["cl"] = 0.0
