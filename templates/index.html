@@ -154,7 +154,6 @@
 
             localStorage.setItem('quantum_portfolio_v26', JSON.stringify(portfolio));
             
-            // Bersihkan form
             document.getElementById('input-coin').value = '';
             document.getElementById('input-amount').value = '';
             document.getElementById('input-price').value = '';
@@ -213,27 +212,22 @@
             coins.forEach(coin => {
                 const isPortfolio = coin.is_portfolio === true;
                 
-                // Format Tampilan Harga
                 const priceFmt = coin.harga < 1.0 ? `$${coin.harga.toFixed(7)}` : `$${coin.harga.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 })}`;
                 const entryFmt = coin.entry > 0 ? (coin.entry < 1.0 ? `$${coin.entry.toFixed(7)}` : `$${coin.entry.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 })}`) : '-';
                 
-                // Hitung Nilai Akumulasi Portofolio Perangkat Aktif
                 if (isPortfolio && coin.amount > 0 && coin.entry > 0) {
                     totalPortfolioValue += coin.current_value || 0;
                     totalInitialCost += (coin.amount * coin.entry);
                     activePortfolioCount++;
                 }
 
-                // Desain Badge Warna untuk Kondisi Volatilitas Harga (1H)
                 const changeColor = coin.persen_harga >= 0 ? 'text-emerald-400 font-semibold' : 'text-rose-400 font-semibold';
                 const changeSign = coin.persen_harga >= 0 ? '+' : '';
 
-                // Desain Tampilan Kecepatan Volume vs MA20
                 let speedClass = 'text-gray-400';
                 if (coin.rasio >= 2.5) speedClass = 'text-cyan-400 font-black animate-pulse';
                 else if (coin.rasio >= 1.5) speedClass = 'text-emerald-400 font-bold';
 
-                // Desain Logika Pewarnaan Badge untuk Kondisi Market Phase Global
                 let phaseBadgeClass = 'bg-slate-900 text-slate-400 border-slate-800';
                 if (coin.fase === 'INSTITUTIONAL BUY') phaseBadgeClass = 'bg-emerald-950/40 text-emerald-300 border-emerald-500/30 font-black tracking-wide';
                 if (coin.fase === 'VALID BREAKOUT') phaseBadgeClass = 'bg-cyan-950/40 text-cyan-300 border-cyan-500/30 font-bold';
@@ -243,7 +237,7 @@
                 if (coin.fase.includes('ENGINE LOCKED')) phaseBadgeClass = 'bg-orange-950/40 text-orange-300 border-orange-500/30';
 
                 // ====================================================================
-                // DESAIN BADGE CSS TAILWIND TERISOLASI UNTUK STRATEGY PLAN STATUS
+                // PENERAPAN BADGE STATUS STRATEGI DINAMIS BARU
                 // ====================================================================
                 let statusBadgeClass = 'border-slate-800 text-slate-400 bg-slate-950/40';
                 if (coin.status_aksi === 'BUY STAGE') statusBadgeClass = 'border-emerald-500/30 text-emerald-400 bg-emerald-950/20';
@@ -255,7 +249,6 @@
                 if (coin.status_aksi === 'CUT LOSS') statusBadgeClass = 'border-rose-500/50 text-rose-400 bg-rose-950/30 font-bold';
                 // ====================================================================
 
-                // Desain Logika Tampilan Kolom PnL Aset Portofolio Aktif
                 let pnlString = '-';
                 let pnlClass = 'text-gray-500 font-mono text-right';
                 if (isPortfolio && coin.entry > 0 && coin.amount > 0) {
@@ -303,7 +296,6 @@
                 tbody.appendChild(tr);
             });
 
-            // Tampilkan Data Akumulasi Ringkasan Portofolio ke Panel Atas
             document.getElementById('summary-total-val').innerText = `$${totalPortfolioValue.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
             document.getElementById('summary-active-count').innerText = `${activePortfolioCount} Assets`;
             
@@ -368,7 +360,6 @@
             }
         }
 
-        // Jalankan siklus monitoring real-time interval 4 detik
         setInterval(updateDashboardData, 4000);
         updateDashboardData();
     </script>
