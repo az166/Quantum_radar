@@ -62,12 +62,12 @@
                     <thead>
                         <tr class="bg-gray-950/80 text-gray-400 text-xs font-bold uppercase tracking-wider border-b border-gray-800">
                             <th class="p-4 w-[22%]">Coin / Structural Analysis</th>
-                            <th class="p-4 w-[12%]">Live Price</th>
-                            <th class="p-4 text-center w-[9%]">Action</th>
-                            <th class="p-4 text-center w-[9%]">Telegram</th>
-                            <th class="p-4 text-center w-[14%]">Plan Status</th>
+                            <th class="p-4 w-[13%]">Live Price</th>
+                            <th class="p-4 text-center w-[10%]">Action</th>
+                            <th class="p-4 text-center w-[10%]">Telegram</th>
+                            <th class="p-4 text-center w-[15%]">Plan Status</th>
                             <th class="p-4 w-[18%]">Asset Performance & TP Progress</th>
-                            <th class="p-4 text-right w-[15%]">ATR Strategic Matrix</th>
+                            <th class="p-4 text-right w-[12%]">ATR Strategic Matrix</th>
                         </tr>
                     </thead>
                     <tbody id="market-rows" class="divide-y divide-gray-900/60 text-sm font-medium">
@@ -153,12 +153,12 @@
         function saveModalDataToCache() {
             const coin = document.getElementById('modal-coin-title').innerText;
             const portfolio = getLocalPortfolio();
-            
+
             portfolio[coin] = {
                 amount: parseFloat(document.getElementById('input-amount').value) || 0,
                 costPrice: parseFloat(document.getElementById('input-entry').value) || 0
             };
-            
+
             saveLocalPortfolio(portfolio);
             closeModal();
             updateDashboardData();
@@ -181,7 +181,7 @@
         function deleteAssetFromCache() {
             const coin = document.getElementById('modal-coin-title').innerText;
             const portfolio = getLocalPortfolio();
-            
+
             if (portfolio[coin] !== undefined) {
                 delete portfolio[coin];
                 saveLocalPortfolio(portfolio);
@@ -204,7 +204,7 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(coinData)
                 });
-                
+
                 if (response.ok) {
                     btn.className = "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 px-2.5 py-1 rounded text-xs font-bold";
                     btn.innerHTML = "✓ Sent";
@@ -342,7 +342,7 @@
         function renderTableRows(coins) {
             const tbody = document.getElementById('market-rows');
             const searchQuery = document.getElementById('search-input').value.trim().toUpperCase();
-            
+
             if (!coins || !Array.isArray(coins) || coins.length === 0) {
                 tbody.innerHTML = `<tr><td colspan="7" class="p-8 text-center text-gray-500 font-mono animate-pulse">⏳ Cold-starting engine. Compiling initial market scan from Binance API...</td></tr>`;
                 return;
@@ -354,7 +354,7 @@
 
                 const priceChangeClass = coin.persen_harga >= 0 ? 'text-emerald-400' : 'text-rose-400';
                 const isPortfolioStyle = coin.is_portfolio ? 'bg-slate-900/60 border-l-4 border-cyan-500' : '';
-                
+
                 let statusBadgeClass = 'border-gray-800 text-gray-400';
                 if (coin.status_aksi === 'BUY STAGE') statusBadgeClass = 'border-emerald-500/30 text-emerald-400 bg-emerald-950/20';
                 if (coin.status_aksi === 'TAKE PROFIT') statusBadgeClass = 'border-amber-500/30 text-amber-400 bg-amber-950/20';
@@ -414,7 +414,7 @@
                     const isPullbackMode = coin.fase.includes("WEAK VOL");
                     const entryColor = isPullbackMode ? 'text-amber-400 border-amber-900 bg-amber-950/20' : 'text-cyan-400 border-cyan-900 bg-cyan-950/20';
                     const labelPrefix = isPullbackMode ? '🎯 DIP' : '🚀 ENTRY';
-                    
+
                     strategicBlock = `
                         <div class="text-gray-500 truncate">Cost: <span class="text-gray-600">-</span></div>
                         <div class="font-mono mt-1 text-xs px-2 py-1 border rounded block text-right ${entryColor} truncate">
@@ -453,7 +453,7 @@
                     </tr>
                 `;
             });
-            
+
             tbody.innerHTML = rowsHtml || `<tr><td colspan="7" class="p-8 text-center text-gray-500 font-mono">Asset not found...</td></tr>`;
         }
 
@@ -464,9 +464,9 @@
                     currentLocalPortfolio = {};
                     saveLocalPortfolio(currentLocalPortfolio);
                 }
-                
+
                 const currentDeviceId = getOrCreateDeviceID();
-                
+
                 const response = await fetch('/api/data', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -475,14 +475,14 @@
                         portfolio: currentLocalPortfolio 
                     })
                 });
-                
+
                 if (!response.ok) {
                     document.getElementById('sync-status').innerText = 'SERVER ERROR (' + response.status + ')';
                     setTimeout(updateDashboardData, 20000); 
                     return;
                 }
                 const rootData = await response.json();
-                
+
                 const btc = rootData.btc_status;
                 const btcBadge = document.getElementById('btc-badge');
                 if(btc && btc.is_safe) {
@@ -495,7 +495,7 @@
 
                 const isFirstLoad = globalCachedData.length === 0;
                 globalCachedData = rootData.market || [];
-                
+
                 // Hanya render seluruh tabel jika ini adalah muatan data pertama
                 if (isFirstLoad) {
                     renderTableRows(globalCachedData);
@@ -503,7 +503,7 @@
 
                 // Inisialisasi dan hubungkan ulang pipa WebSocket ke Binance
                 initBinanceWebSocket(globalCachedData);
-                
+
                 if (globalCachedData.length > 0) {
                     document.getElementById('sync-status').innerText = 'QUANTUM SECURE BROWSER ENGINE LIVE';
                 } else {
@@ -513,7 +513,7 @@
                 console.error(err);
                 document.getElementById('sync-status').innerText = 'CORE CONNECTION LOST (RETRYING)';
             }
-            
+
             // Pengambilan kalkulasi indikator rumit (MA, MACD, ATR) dijadwalkan per 20 detik
             setTimeout(updateDashboardData, 20000);
         }
