@@ -576,4 +576,5 @@ def send_manual_alert():
         return jsonify({"status": "error", "message": str(e)}), 400
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=
+    app.run(host='0.0.0.0', port=5000, debug=False)
+
