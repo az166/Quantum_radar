@@ -16,7 +16,7 @@
         <header class="mb-6 flex flex-col md:flex-row justify-between items-start md:items-center p-5 glass-panel rounded-xl gap-4 shadow-2xl">
             <div>
                 <h1 class="text-xl font-black tracking-wider text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-indigo-500">
-                    QUANTUM RADAR v2.7
+                    QUANTUM RADAR
                 </h1>
                 <p class="text-xs text-gray-400 mt-1" id="sync-status">Asset Data Matrix Tracking Pipeline</p>
             </div>
@@ -196,7 +196,6 @@
             .catch(err => alert('Network pipeline broadcast failed.'));
         }
 
-        // KONEKSI WEBSOCKET LANGSUNG KE BINANCE UNTUK UPDATE HARGA TIAP DETIK
         function connectPriceWebSocket(coinSymbols) {
             if (webSocketInstance) {
                 webSocketInstance.close();
@@ -204,7 +203,6 @@
 
             if (!coinSymbols || coinSymbols.length === 0) return;
 
-            // Buat stream nama parameter gabungan (contoh: btcusdt@ticker / ethusdt@ticker)
             const streams = coinSymbols.map(sym => `${sym.toLowerCase()}usdt@ticker`).join('/');
             const wsUrl = `wss://stream.binance.com:9443/ws/${streams}`;
 
@@ -212,15 +210,13 @@
 
             webSocketInstance.onmessage = (event) => {
                 const data = JSON.parse(event.data);
-                const rawSymbol = data.s; // Contoh: BTCUSDT
-                const currentPrice = parseFloat(data.c); // Harga penutupan terbaru
+                const rawSymbol = data.s; 
+                const currentPrice = parseFloat(data.c); 
 
-                // Cari data koin di dalam cache memori lokal browser
                 const cleanCoinName = rawSymbol.replace("USDT", "");
                 const coinObj = globalCachedData.find(item => item.koin === cleanCoinName);
 
                 if (coinObj) {
-                    // Update harga instant dan kalkulasi ulang dinamika PnL di frontend setiap detik
                     coinObj.harga = currentPrice;
                     
                     if (coinObj.is_portfolio && coinObj.entry > 0 && coinObj.amount > 0) {
@@ -229,7 +225,7 @@
                         coinObj.pnl_val = coinObj.current_value - initialVal;
                         coinObj.pnl_pct = (coinObj.pnl_val / initialVal) * 100;
 
-                        // Perbarui status aksi secara instan berdasarkan pergerakan harga per detik
+                        // INTEGRASI LOGIKA DINAMIS SINKRONISASI EVALUASI STRATEGI TP / CL DARI BACKEND
                         const targetTp = coinObj.entry + (2.0 * coinObj.atr);
                         const targetCl = coinObj.entry - (1.5 * coinObj.atr);
 
@@ -237,7 +233,6 @@
                         else if (currentPrice <= targetCl) coinObj.status_aksi = "CUT LOSS";
                     }
                     
-                    // Render ulang hanya baris tabel secara cepat tanpa merusak DOM utama
                     renderTableRows(globalCachedData);
                 }
             };
@@ -266,6 +261,10 @@
                 const priceFmt = coin.harga < 1.0 ? `$${coin.harga.toFixed(7)}` : `$${coin.harga.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 })}`;
                 const entryFmt = coin.entry > 0 ? (coin.entry < 1.0 ? `$${coin.entry.toFixed(7)}` : `$${coin.entry.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 })}`) : '-';
                 
+                // MENGAMBIL VARIABEL SUGGESTED ENTRY YANG DIHITUNG BACKEND SECARA UTUH
+                const saranEntryVal = coin.saran_entry || 0;
+                const saranFmt = saranEntryVal > 0 ? (saranEntryVal < 1.0 ? `$${saranEntryVal.toFixed(7)}` : `$${saranEntryVal.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 })}`) : '-';
+
                 if (isPortfolio && coin.amount > 0 && coin.entry > 0) {
                     totalPortfolioValue += coin.current_value || 0;
                     totalInitialCost += (coin.amount * coin.entry);
@@ -325,9 +324,12 @@
                         </span>
                     </td>
                     <td class="p-4 text-center">
-                        <span class="px-2 py-1 rounded border text-[10px] font-mono ${statusBadgeClass}">
-                            ${coin.status_aksi}
-                        </span>
+                        <div class="flex flex-col items-center gap-1">
+                            <span class="px-2 py-1 rounded border text-[10px] font-mono ${statusBadgeClass}">
+                                ${coin.status_aksi}
+                            </span>
+                            <span class="text-[9px] text-gray-500 font-mono">Trigger: ${saranFmt}</span>
+                        </div>
                     </td>
                     <td class="p-4 text-right font-mono text-slate-400">${isPortfolio && coin.amount > 0 ? coin.amount : '-'}</td>
                     <td class="p-4 text-right font-mono text-slate-400">${entryFmt}</td>
@@ -398,7 +400,6 @@
                 globalCachedData = rootData.market || [];
                 renderTableRows(globalCachedData);
                 
-                // Hubungkan WebSocket untuk koin yang aktif dalam daftar setelah data backend diterima
                 const uniqueCoins = globalCachedData.map(c => c.koin);
                 connectPriceWebSocket(uniqueCoins);
 
@@ -409,7 +410,6 @@
             }
         }
 
-        // Sinkronisasi data struktur dan fase berat dari backend diturunkan menjadi setiap 12 detik
         setInterval(updateDashboardData, 12000);
         updateDashboardData();
     </script>
