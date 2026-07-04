@@ -110,8 +110,8 @@
     <script>
         let currentTargetCoin = "";
         let globalCachedData = [];
+        let webSocketInstance = null;
 
-        // PERBAIKAN: Fungsi untuk membuat / mengambil Device ID unik untuk isolasi cache server
         function getOrCreateDeviceID() {
             let id = localStorage.getItem('quantum_device_id');
             if (!id) {
@@ -153,12 +153,12 @@
         function saveModalDataToCache() {
             const coin = document.getElementById('modal-coin-title').innerText;
             const portfolio = getLocalPortfolio();
-            
+
             portfolio[coin] = {
                 amount: parseFloat(document.getElementById('input-amount').value) || 0,
                 costPrice: parseFloat(document.getElementById('input-entry').value) || 0
             };
-            
+
             saveLocalPortfolio(portfolio);
             closeModal();
             updateDashboardData();
@@ -181,7 +181,7 @@
         function deleteAssetFromCache() {
             const coin = document.getElementById('modal-coin-title').innerText;
             const portfolio = getLocalPortfolio();
-            
+
             if (portfolio[coin] !== undefined) {
                 delete portfolio[coin];
                 saveLocalPortfolio(portfolio);
@@ -204,12 +204,12 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(coinData)
                 });
-                
+
                 if (response.ok) {
                     btn.className = "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 px-2.5 py-1 rounded text-xs font-bold";
                     btn.innerHTML = "✓ Sent";
                     setTimeout(() => {
-                        btn.className = "bg-amber-600/10 text-amber-400 hover:bg-amber-600/30 border border-amber-500/20 px-2.5 py-1 rounded text-xs font-bold transition";
+                        btn.className = "bg-amber-600/10 text-amber-400 hover:bg-amber-600/30 border border-amber-500/20 px-2.5 py-1 rounded text-xs font-bold transition flex items-center gap-1 mx-auto";
                         btn.innerHTML = originalHtml;
                         btn.disabled = false;
                     }, 3000);
@@ -227,10 +227,55 @@
 
         function handleSearchFilter() { renderTableRows(globalCachedData); }
 
+        function connectPriceWebSocket(coinSymbols) {
+            if (webSocketInstance) {
+                webSocketInstance.close();
+            }
+
+            if (!coinSymbols || coinSymbols.length === 0) return;
+
+            const streams = coinSymbols.map(sym => `${sym.toLowerCase()}usdt@ticker`).join('/');
+            const wsUrl = `wss://stream.binance.com:9443/ws/${streams}`;
+
+            webSocketInstance = new WebSocket(wsUrl);
+
+            webSocketInstance.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                const rawSymbol = data.s; 
+                const currentPrice = parseFloat(data.c); 
+                const priceChangePercent = parseFloat(data.P);
+
+                const cleanCoinName = rawSymbol.replace("USDT", "");
+                const coinObj = globalCachedData.find(item => item.koin === cleanCoinName);
+
+                if (coinObj) {
+                    coinObj.harga = currentPrice;
+                    coinObj.persen_harga = priceChangePercent;
+                    
+                    if (coinObj.is_portfolio && coinObj.entry > 0 && coinObj.amount > 0) {
+                        coinObj.current_value = coinObj.amount * currentPrice;
+                        const initialVal = coinObj.amount * coinObj.entry;
+                        coinObj.pnl_val = coinObj.current_value - initialVal;
+                        coinObj.pnl_pct = (coinObj.pnl_val / initialVal) * 100;
+
+                        if (currentPrice >= coinObj.tp) coinObj.status_aksi = "TAKE PROFIT";
+                        else if (currentPrice <= coinObj.cl) coinObj.status_aksi = "CUT LOSS";
+                        else coinObj.status_aksi = coinObj.pnl_val >= 0 ? "HOLDING (PROFIT)" : "HOLD (DRAWDOWN)";
+                    }
+                    
+                    renderTableRows(globalCachedData);
+                }
+            };
+
+            webSocketInstance.onerror = (err) => {
+                console.error("WebSocket Price Stream Error:", err);
+            };
+        }
+
         function renderTableRows(coins) {
             const tbody = document.getElementById('market-rows');
             const searchQuery = document.getElementById('search-input').value.trim().toUpperCase();
-            
+
             if (!coins || !Array.isArray(coins) || coins.length === 0) {
                 tbody.innerHTML = `<tr><td colspan="7" class="p-8 text-center text-gray-500 font-mono animate-pulse">⏳ Waiting for Market Engine Data from Server...</td></tr>`;
                 return;
@@ -242,11 +287,13 @@
 
                 const priceChangeClass = coin.persen_harga >= 0 ? 'text-emerald-400' : 'text-rose-400';
                 const isPortfolioStyle = coin.is_portfolio ? 'bg-slate-900/60 border-l-4 border-cyan-500' : '';
-                
+
                 let statusBadgeClass = 'border-gray-800 text-gray-400';
                 if (coin.status_aksi === 'BUY STAGE') statusBadgeClass = 'border-emerald-500/30 text-emerald-400 bg-emerald-950/20';
-                if (coin.status_aksi === 'TAKE PROFIT') statusBadgeClass = 'border-amber-500/30 text-amber-400 bg-amber-950/20';
-                if (coin.status_aksi === 'CUT LOSS') statusBadgeClass = 'border-rose-500/40 text-rose-400 bg-rose-950/20';
+                if (coin.status_aksi.includes('TAKE PROFIT')) statusBadgeClass = 'border-amber-500/30 text-amber-400 bg-amber-950/20 font-bold animate-pulse';
+                if (coin.status_aksi.includes('CUT LOSS')) statusBadgeClass = 'border-rose-500/40 text-rose-400 bg-rose-950/20 font-bold';
+                if (coin.status_aksi.includes('HOLDING (PROFIT)')) statusBadgeClass = 'border-emerald-500/20 text-emerald-500/90 bg-emerald-950/10';
+                if (coin.status_aksi.includes('HOLD (DRAWDOWN)')) statusBadgeClass = 'border-slate-700 text-slate-400 bg-slate-900/20';
 
                 let faseLabel = coin.fase || "SCANNING";
                 let faseColorClass = 'text-cyan-400';
@@ -303,7 +350,7 @@
                     const isPullbackMode = coin.fase.includes("WEAK VOL");
                     const entryColor = isPullbackMode ? 'text-amber-400 border-amber-900 bg-amber-950/20' : 'text-cyan-400 border-cyan-900 bg-cyan-950/20';
                     const labelPrefix = isPullbackMode ? '🎯 LIMIT THE DIP' : '🚀 BREAKOUT ENTRY';
-                    
+
                     strategicBlock = `
                         <div class="text-gray-500">Cost: <span class="text-gray-600">-</span></div>
                         <div class="font-mono mt-1 text-xs px-2 py-1 border rounded block text-right ${entryColor}">
@@ -342,7 +389,7 @@
                     </tr>
                 `;
             });
-            
+
             tbody.innerHTML = rowsHtml || `<tr><td colspan="7" class="p-8 text-center text-gray-500 font-mono">Asset not found...</td></tr>`;
         }
 
@@ -353,26 +400,24 @@
                     currentLocalPortfolio = {};
                     saveLocalPortfolio(currentLocalPortfolio);
                 }
-                
-                // PERBAIKAN: Ambil token ID unik browser saat ini
+
                 const currentDeviceId = getOrCreateDeviceID();
-                
+
                 const response = await fetch('/api/data', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    // PERBAIKAN: Kirimkan device_id bersama dengan payload data portfolio
                     body: JSON.stringify({ 
                         device_id: currentDeviceId,
                         portfolio: currentLocalPortfolio 
                     })
                 });
-                
+
                 if (!response.ok) {
                     document.getElementById('sync-status').innerText = 'SERVER ERROR (' + response.status + ')';
                     return;
                 }
                 const rootData = await response.json();
-                
+
                 const btc = rootData.btc_status;
                 const btcBadge = document.getElementById('btc-badge');
                 if(btc && btc.is_safe) {
@@ -385,15 +430,18 @@
 
                 globalCachedData = rootData.market || [];
                 renderTableRows(globalCachedData);
-                
-                document.getElementById('sync-status').innerText = 'QUANTUM SECURE BROWSER ENGINE LIVE';
+
+                const uniqueCoins = globalCachedData.map(c => c.koin);
+                connectPriceWebSocket(uniqueCoins);
+
+                document.getElementById('sync-status').innerText = 'QUANTUM SECURE WEBSOCKET ACTIVE (1S)';
             } catch (err) {
                 console.error(err);
                 document.getElementById('sync-status').innerText = 'CORE CONNECTION LOST (RETRYING)';
             }
         }
 
-        setInterval(updateDashboardData, 4000);
+        setInterval(updateDashboardData, 12000);
         updateDashboardData();
     </script>
 </body>
