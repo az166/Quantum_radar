@@ -16,355 +16,367 @@
         <header class="mb-6 flex flex-col md:flex-row justify-between items-start md:items-center p-5 glass-panel rounded-xl gap-4 shadow-2xl">
             <div>
                 <h1 class="text-xl font-black tracking-wider text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-indigo-500">
-                    QUANTUM RADAR 
+                    QUANTUM RADAR v2.7
                 </h1>
-                <p class="text-xs text-gray-400 mt-1">Asset Data is Stored Securely in Your Browser Cache</p>
+                <p class="text-xs text-gray-400 mt-1" id="sync-status">Asset Data Matrix Tracking Pipeline</p>
             </div>
-            <div class="flex flex-col md:flex-row items-start md:items-center gap-3">
-                <div id="btc-badge" class="text-xs font-mono px-3 py-1.5 rounded-xl border border-gray-800 bg-black/40 text-gray-400">
-                    BTC PROTECTION: MONITORING
-                </div>
-                <div class="flex items-center gap-3 bg-black/40 px-4 py-2 rounded-xl border border-gray-800">
-                    <span class="relative flex h-2 w-2">
-                        <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-75"></span>
-                        <span class="relative inline-flex rounded-full h-2 w-2 bg-cyan-500"></span>
-                    </span>
-                    <span id="sync-status" class="text-xs font-mono text-cyan-400">CONNECTING CORE</span>
+            <div class="flex items-center gap-3">
+                <span class="text-xs text-gray-500 font-mono">BTC CIRCUIT:</span>
+                <div id="btc-badge" class="text-xs font-mono px-3 py-1.5 rounded-xl border border-gray-800 bg-gray-900/50 text-gray-400">
+                    LOADING...
                 </div>
             </div>
         </header>
 
-        <section class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-            <div class="md:col-span-2 p-4 glass-panel rounded-xl flex flex-col sm:flex-row items-end gap-3 shadow-md">
-                <div class="w-full">
-                    <label class="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-1">Add New Watchlist Asset</label>
-                    <input type="text" id="new-coin-name" placeholder="Enter coin symbol (e.g. SOL)..." class="w-full bg-black/50 border border-gray-800 px-3 py-2 rounded-lg text-white font-bold text-sm focus:outline-none focus:border-cyan-500 uppercase">
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
+            <div class="lg:col-span-1 p-5 glass-panel rounded-xl shadow-xl flex flex-col justify-between">
+                <div>
+                    <h2 class="text-sm font-bold uppercase tracking-widest text-indigo-400 mb-4 flex items-center gap-2">
+                        <span>📥</span> Register / Update Asset
+                    </h2>
+                    <div class="space-y-3">
+                        <div>
+                            <label class="block text-xs font-semibold text-gray-400 mb-1">COIN NAME (e.g. BTC, ETH, SOL)</label>
+                            <input type="text" id="input-coin" class="w-full bg-slate-900/90 border border-slate-800 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500 font-bold tracking-wider placeholder-gray-600" placeholder="BTC">
+                        </div>
+                        <div class="grid grid-cols-2 gap-3">
+                            <div>
+                                <label class="block text-xs font-semibold text-gray-400 mb-1">AMOUNT BOUGHT</label>
+                                <input type="number" step="any" id="input-amount" class="w-full bg-slate-900/90 border border-slate-800 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500 font-mono" placeholder="0.05">
+                            </div>
+                            <div>
+                                <label class="block text-xs font-semibold text-gray-400 mb-1">AVG COST PRICE ($)</label>
+                                <input type="number" step="any" id="input-price" class="w-full bg-slate-900/90 border border-slate-800 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500 font-mono" placeholder="64500">
+                            </div>
+                        </div>
+                    </div>
                 </div>
-                <div class="w-full sm:w-auto">
-                    <button onclick="addNewCustomCoin()" class="w-full sm:w-max bg-gradient-to-r from-cyan-600 to-indigo-600 text-white hover:from-cyan-500 hover:to-indigo-500 px-5 py-2 rounded-lg text-xs font-bold transition shadow-lg h-9">
-                        + Add Asset
+                <div class="mt-5 pt-4 border-t border-slate-900 flex gap-2">
+                    <button onclick="saveAssetToLocalStorage()" class="flex-1 bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-500 hover:to-blue-500 text-white font-bold text-xs uppercase tracking-wider py-2.5 px-4 rounded-lg transition-all shadow-lg shadow-indigo-950/50 cursor-pointer">
+                        Save Asset
+                    </button>
+                    <button onclick="clearAllAssets()" class="bg-slate-900 hover:bg-rose-950/30 text-gray-400 hover:text-rose-400 border border-slate-800 hover:border-rose-900/50 font-bold text-xs uppercase tracking-wider py-2.5 px-3 rounded-lg transition-all cursor-pointer" title="Clear Watchlist/Portfolio">
+                        Reset
                     </button>
                 </div>
             </div>
 
-            <div class="p-4 glass-panel rounded-xl flex flex-col justify-end shadow-md">
-                <label class="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-1">Search Inside Table</label>
-                <div class="relative">
-                    <input type="text" id="search-input" oninput="handleSearchFilter()" placeholder="Type ticker name..." class="w-full bg-black/50 border border-gray-800 pl-8 pr-3 py-2 rounded-lg text-white text-sm focus:outline-none focus:border-cyan-500 uppercase font-mono">
-                    <span class="absolute left-2.5 top-2.5 text-gray-600 text-xs">🔍</span>
+            <div class="lg:col-span-2 p-5 glass-panel rounded-xl shadow-xl grid grid-cols-2 md:grid-cols-4 gap-4">
+                <div class="p-4 bg-slate-950/40 border border-slate-900 rounded-lg flex flex-col justify-between">
+                    <span class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Total Value</span>
+                    <span class="text-lg font-black text-white font-mono mt-2 block" id="summary-total-val">$0.00</span>
+                </div>
+                <div class="p-4 bg-slate-950/40 border border-slate-900 rounded-lg flex flex-col justify-between">
+                    <span class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Net PnL ($)</span>
+                    <span class="text-lg font-black font-mono mt-2 block text-gray-400" id="summary-pnl-val">$0.00</span>
+                </div>
+                <div class="p-4 bg-slate-950/40 border border-slate-900 rounded-lg flex flex-col justify-between">
+                    <span class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Net PnL (%)</span>
+                    <span class="text-lg font-black font-mono mt-2 block text-gray-400" id="summary-pnl-pct">0.00%</span>
+                </div>
+                <div class="p-4 bg-slate-950/40 border border-slate-900 rounded-lg flex flex-col justify-between">
+                    <span class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Active Assets</span>
+                    <span class="text-lg font-black text-indigo-400 font-mono mt-2 block" id="summary-active-count">0 Coins</span>
                 </div>
             </div>
-        </section>
+        </div>
 
-        <main class="glass-panel rounded-xl overflow-hidden shadow-2xl border border-gray-900">
-            <div class="overflow-x-auto w-full">
+        <div class="glass-panel rounded-xl shadow-2xl overflow-hidden border border-white/5">
+            <div class="p-4 bg-slate-900/40 border-b border-slate-900 flex justify-between items-center">
+                <h3 class="text-xs font-black uppercase tracking-widest text-slate-400 flex items-center gap-2">
+                    <span class="w-2 h-2 rounded-full bg-cyan-400 animate-ping"></span> Live Quantum Scanning Matrix
+                </h3>
+                <span class="text-[10px] bg-slate-950 text-slate-400 font-mono px-2 py-1 rounded border border-slate-900">
+                    PRICE STREAM: REAL-TIME (1S)
+                </span>
+            </div>
+            <div class="overflow-x-auto">
                 <table class="w-full text-left border-collapse">
                     <thead>
-                        <tr class="bg-gray-950/80 text-gray-400 text-xs font-bold uppercase tracking-wider border-b border-gray-800">
-                            <th class="p-4">Coin / Structural Analysis</th>
-                            <th class="p-4">Live Price</th>
-                            <th class="p-4 text-center">Action</th>
-                            <th class="p-4 text-center">Telegram</th>
-                            <th class="p-4 text-center">Plan Status</th>
-                            <th class="p-4">Asset Performance & TP Progress</th>
-                            <th class="p-4 text-right">ATR Strategic Matrix</th>
+                        <tr class="border-b border-slate-900 bg-slate-950/60 text-[11px] font-bold uppercase tracking-wider text-gray-400 select-none">
+                            <th class="p-4">Asset Info</th>
+                            <th class="p-4 text-right">Live Price</th>
+                            <th class="p-4 text-right">Volatility (1H)</th>
+                            <th class="p-4 text-right">Vol vs MA20</th>
+                            <th class="p-4 text-center">Market Phase</th>
+                            <th class="p-4 text-center">Strategy Plan</th>
+                            <th class="p-4 text-right">Holding Amount</th>
+                            <th class="p-4 text-right">Avg Entry</th>
+                            <th class="p-4 text-right">Unrealized PnL</th>
+                            <th class="p-4 text-center">Broadcast</th>
                         </tr>
                     </thead>
-                    <tbody id="market-rows" class="divide-y divide-gray-900/60 text-sm font-medium">
+                    <tbody id="market-table-body" class="text-xs divide-y divide-slate-900/60">
                         <tr>
-                            <td colspan="7" class="p-8 text-center text-gray-500 font-mono animate-pulse">
-                                Initializing secure browser cache integration...
+                            <td colspan="10" class="p-8 text-center text-gray-500 font-medium font-mono">
+                                Synchronizing network pipeline with engine cache...
                             </td>
                         </tr>
                     </tbody>
                 </table>
             </div>
-        </main>
-    </div>
-
-    <div id="manage-modal" class="hidden fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-        <div class="bg-slate-900 border border-slate-800 p-6 rounded-xl w-full max-w-md shadow-2xl">
-            <div class="flex justify-between items-center mb-4">
-                <h3 class="text-base font-bold text-white">Manage Asset Parameters: <span id="modal-coin-title" class="text-cyan-400"></span></h3>
-                <button onclick="deleteAssetFromCache()" class="bg-rose-600/20 text-rose-400 hover:bg-rose-600/40 border border-rose-500/30 px-2 py-1 rounded text-xs font-bold transition">
-                    🗑 Delete Asset
-                </button>
-            </div>
-            <div class="space-y-3">
-                <div>
-                    <label class="block text-xs text-slate-400 mb-1">Asset Volume (Amount)</label>
-                    <input type="number" id="input-amount" step="any" class="w-full bg-slate-950 border border-slate-800 px-3 py-2 rounded text-white text-sm focus:outline-none focus:border-cyan-500">
-                </div>
-                <div>
-                    <label class="block text-xs text-slate-400 mb-1">Entry Price (Cost Base)</label>
-                    <input type="number" id="input-entry" step="any" class="w-full bg-slate-950 border border-slate-800 px-3 py-2 rounded text-white text-sm focus:outline-none focus:border-cyan-500">
-                </div>
-            </div>
-            <div class="flex justify-end gap-2 mt-5">
-                <button onclick="closeModal()" class="px-4 py-2 bg-slate-800 text-slate-300 text-xs rounded font-bold transition hover:bg-slate-700">Cancel</button>
-                <button onclick="saveModalDataToCache()" class="px-4 py-2 bg-cyan-600 text-white text-xs rounded font-bold transition hover:bg-cyan-500">Save Parameters</button>
-            </div>
         </div>
     </div>
 
     <script>
-        let currentTargetCoin = "";
-        let globalCachedData = [];
-
-        // PERBAIKAN: Fungsi untuk membuat / mengambil Device ID unik untuk isolasi cache server
-        function getOrCreateDeviceID() {
-            let id = localStorage.getItem('quantum_device_id');
-            if (!id) {
-                id = 'dev_' + Math.random().toString(36).substring(2, 15) + '_' + Date.now();
-                localStorage.setItem('quantum_device_id', id);
-            }
-            return id;
+        let clientDeviceUUID = localStorage.getItem('quantum_device_uuid');
+        if (!clientDeviceUUID) {
+            clientDeviceUUID = 'DEV-' + Math.random().toString(36).substring(2, 15).toUpperCase();
+            localStorage.setItem('quantum_device_uuid', clientDeviceUUID);
         }
+
+        let globalCachedData = [];
+        let webSocketInstance = null;
 
         function getLocalPortfolio() {
-            const data = localStorage.getItem('quantum_portfolio');
-            return data ? JSON.parse(data) : {};
-        }
-
-        function saveLocalPortfolio(portfolio) {
-            localStorage.setItem('quantum_portfolio', JSON.stringify(portfolio));
-        }
-
-        function formatQuantumPrice(val) {
-            if (val === undefined || val === null || isNaN(val)) return "-";
-            if (val === 0) return "$0.00";
-            if (val < 1.0) {
-                return "$" + val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 8 });
-            } else {
-                return "$" + val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 });
-            }
-        }
-
-        function openModal(coin, amount, entry) {
-            currentTargetCoin = coin;
-            document.getElementById('modal-coin-title').innerText = coin;
-            document.getElementById('input-amount').value = amount || 0;
-            document.getElementById('input-entry').value = entry || 0;
-            document.getElementById('manage-modal').classList.remove('hidden');
-        }
-
-        function closeModal() { document.getElementById('manage-modal').classList.add('hidden'); }
-
-        function saveModalDataToCache() {
-            const coin = document.getElementById('modal-coin-title').innerText;
-            const portfolio = getLocalPortfolio();
-            
-            portfolio[coin] = {
-                amount: parseFloat(document.getElementById('input-amount').value) || 0,
-                costPrice: parseFloat(document.getElementById('input-entry').value) || 0
-            };
-            
-            saveLocalPortfolio(portfolio);
-            closeModal();
-            updateDashboardData();
-        }
-
-        function addNewCustomCoin() {
-            const coinInput = document.getElementById('new-coin-name');
-            const coinName = coinInput.value.trim().toUpperCase();
-            if(!coinName) return;
-
-            const portfolio = getLocalPortfolio();
-            if (!portfolio[coinName]) {
-                portfolio[coinName] = { amount: 0, costPrice: 0 };
-                saveLocalPortfolio(portfolio);
-            }
-            coinInput.value = "";
-            updateDashboardData();
-        }
-
-        function deleteAssetFromCache() {
-            const coin = document.getElementById('modal-coin-title').innerText;
-            const portfolio = getLocalPortfolio();
-            
-            if (portfolio[coin] !== undefined) {
-                delete portfolio[coin];
-                saveLocalPortfolio(portfolio);
-            }
-            closeModal();
-            updateDashboardData();
-        }
-
-        async function sendTelegramManual(btn, coinStr) {
-            const coinData = globalCachedData.find(c => c.koin === coinStr);
-            if (!coinData) return;
-
-            const originalHtml = btn.innerHTML;
-            btn.disabled = true;
-            btn.innerHTML = `<span class="inline-block animate-spin text-xs">⏳</span>`;
-
             try {
-                const response = await fetch('/api/telegram/send_manual', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(coinData)
-                });
-                
-                if (response.ok) {
-                    btn.className = "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 px-2.5 py-1 rounded text-xs font-bold";
-                    btn.innerHTML = "✓ Sent";
-                    setTimeout(() => {
-                        btn.className = "bg-amber-600/10 text-amber-400 hover:bg-amber-600/30 border border-amber-500/20 px-2.5 py-1 rounded text-xs font-bold transition";
-                        btn.innerHTML = originalHtml;
-                        btn.disabled = false;
-                    }, 3000);
-                } else {
-                    alert("Failed to send Telegram alert.");
-                    btn.innerHTML = originalHtml;
-                    btn.disabled = false;
-                }
-            } catch (err) {
-                console.error(err);
-                btn.innerHTML = originalHtml;
-                btn.disabled = false;
+                return JSON.parse(localStorage.getItem('quantum_portfolio_v26')) || {};
+            } catch {
+                return {};
             }
         }
 
-        function handleSearchFilter() { renderTableRows(globalCachedData); }
+        function saveAssetToLocalStorage() {
+            const coinRaw = document.getElementById('input-coin').value.trim().toUpperCase();
+            const amountRaw = parseFloat(document.getElementById('input-amount').value);
+            const priceRaw = parseFloat(document.getElementById('input-price').value);
 
-        function renderTableRows(coins) {
-            const tbody = document.getElementById('market-rows');
-            const searchQuery = document.getElementById('search-input').value.trim().toUpperCase();
-            
-            if (!coins || !Array.isArray(coins) || coins.length === 0) {
-                tbody.innerHTML = `<tr><td colspan="7" class="p-8 text-center text-gray-500 font-mono animate-pulse">⏳ Waiting for Market Engine Data from Server...</td></tr>`;
+            if (!coinRaw) {
+                alert('Tolong isi nama koin dengan benar.');
                 return;
             }
 
-            let rowsHtml = '';
-            coins.forEach(coin => {
-                if (searchQuery && !coin.koin.includes(searchQuery)) return;
+            let portfolio = getLocalPortfolio();
+            portfolio[coinRaw] = {
+                amount: isNaN(amountRaw) ? 0.0 : amountRaw,
+                costPrice: isNaN(priceRaw) ? 0.0 : priceRaw
+            };
 
-                const priceChangeClass = coin.persen_harga >= 0 ? 'text-emerald-400' : 'text-rose-400';
-                const isPortfolioStyle = coin.is_portfolio ? 'bg-slate-900/60 border-l-4 border-cyan-500' : '';
-                
-                let statusBadgeClass = 'border-gray-800 text-gray-400';
-                if (coin.status_aksi === 'BUY STAGE') statusBadgeClass = 'border-emerald-500/30 text-emerald-400 bg-emerald-950/20';
-                if (coin.status_aksi === 'TAKE PROFIT') statusBadgeClass = 'border-amber-500/30 text-amber-400 bg-amber-950/20';
-                if (coin.status_aksi === 'CUT LOSS') statusBadgeClass = 'border-rose-500/40 text-rose-400 bg-rose-950/20';
-
-                let faseLabel = coin.fase || "SCANNING";
-                let faseColorClass = 'text-cyan-400';
-                if (faseLabel.includes("WEAK VOL")) {
-                    faseColorClass = 'text-amber-500 font-bold';
-                    faseLabel = "⚠️ PULLBACK: " + faseLabel;
-                } else if (faseLabel.includes("ENGINE LOCKED")) {
-                    faseColorClass = 'text-rose-500 font-bold';
-                    faseLabel = "❌ " + faseLabel;
-                }
-
-                let progressPct = 0;
-                if (coin.tp > coin.entry && coin.harga >= coin.entry) {
-                    progressPct = ((coin.harga - coin.entry) / (coin.tp - coin.entry)) * 100;
-                    if (progressPct > 100) progressPct = 100;
-                }
-
-                let performanceContent = '';
-                if (coin.is_portfolio && coin.entry > 0) {
-                    const pnlColor = coin.pnl_val >= 0 ? 'text-emerald-400' : 'text-rose-400';
-                    const pnlSign = coin.pnl_val >= 0 ? '+' : '';
-                    performanceContent = `
-                        <div class="flex flex-col gap-1 w-44">
-                            <div class="flex items-center gap-2">
-                                <div class="w-full bg-gray-950 rounded-full h-1.5 overflow-hidden border border-gray-800">
-                                    <div class="bg-gradient-to-r from-cyan-500 to-indigo-500 h-1.5 rounded-full" style="width: ${progressPct}%"></div>
-                                </div>
-                                <span class="text-xs font-mono font-bold text-cyan-400">${progressPct.toFixed(0)}%</span>
-                            </div>
-                            <div class="text-xs font-mono flex justify-between">
-                                <span class="text-gray-400">Hold: $${(coin.current_value || 0).toFixed(2)}</span>
-                                <span class="${pnlColor} font-bold">${pnlSign}$${(coin.pnl_val || 0).toFixed(2)} (${pnlSign}${(coin.pnl_pct || 0).toFixed(1)}%)</span>
-                            </div>
-                        </div>
-                    `;
-                } else if (coin.is_portfolio && coin.entry === 0) {
-                    performanceContent = `<div class="text-xs font-mono text-cyan-500/80"><span class="bg-cyan-950/40 border border-cyan-900/60 px-2 py-1 rounded">🔮 BROWSER WATCHLIST ACTIVE</span></div>`;
-                } else {
-                    performanceContent = `<div class="text-xs font-mono text-gray-500"><span class="bg-gray-950 border border-gray-800 px-2 py-1 rounded">SCANNER INCLUSION</span></div>`;
-                }
-
-                let strategicBlock = '';
-                if (coin.entry > 0) {
-                    strategicBlock = `
-                        <div class="text-gray-400">Cost: <span class="text-gray-200">${formatQuantumPrice(coin.entry)}</span></div>
-                        <div class="text-emerald-400 font-bold mt-0.5">TP (2.0x): <span>${formatQuantumPrice(coin.tp)}</span></div>
-                        <div class="text-rose-400 font-bold mt-0.5">CL (1.5x): <span>${formatQuantumPrice(coin.cl)}</span></div>
-                        <div class="font-mono mt-1 text-xs px-2 py-0.5 border rounded block text-right border-cyan-500/40 text-cyan-400 bg-cyan-950/20">
-                            <span class="text-xs block opacity-60 font-sans">🎯 AVG DOWN TRIGGER</span>
-                            ${formatQuantumPrice(coin.saran_entry)}
-                        </div>
-                    `;
-                } else {
-                    const isPullbackMode = coin.fase.includes("WEAK VOL");
-                    const entryColor = isPullbackMode ? 'text-amber-400 border-amber-900 bg-amber-950/20' : 'text-cyan-400 border-cyan-900 bg-cyan-950/20';
-                    const labelPrefix = isPullbackMode ? '🎯 LIMIT THE DIP' : '🚀 BREAKOUT ENTRY';
-                    
-                    strategicBlock = `
-                        <div class="text-gray-500">Cost: <span class="text-gray-600">-</span></div>
-                        <div class="font-mono mt-1 text-xs px-2 py-1 border rounded block text-right ${entryColor}">
-                            <span class="text-xs block opacity-60 font-sans">${labelPrefix}</span>
-                            ${formatQuantumPrice(coin.saran_entry)}
-                        </div>
-                    `;
-                }
-
-                rowsHtml += `
-                    <tr class="${isPortfolioStyle} hover:bg-gray-900/40 transition border-b border-gray-900">
-                        <td class="p-4">
-                            <div class="flex items-center gap-2">
-                                <span class="text-xs">${coin.is_portfolio ? '⚡' : '🔍'}</span>
-                                <span class="font-black text-white text-base tracking-wide">${coin.koin}</span>
-                                <span class="text-xs bg-black/40 text-gray-400 px-1.5 py-0.5 rounded font-mono">Vol MA20: ${(coin.rasio || 0).toFixed(1)}x</span>
-                                <span class="text-xs bg-indigo-950/40 text-indigo-400 border border-indigo-900 px-1.5 py-0.5 rounded font-mono">Whale: ${coin.whale}%</span>
-                            </div>
-                            <div class="text-xs ${faseColorClass} mt-1 uppercase tracking-wider font-semibold">${faseLabel}</div>
-                        </td>
-                        <td class="p-4 font-mono">
-                            <div class="text-white font-bold">${formatQuantumPrice(coin.harga)}</div>
-                            <div class="text-xs ${priceChangeClass} font-bold mt-0.5">${coin.persen_harga >= 0 ? '+' : ''}${(coin.persen_harga || 0).toFixed(2)}%</div>
-                        </td>
-                        <td class="p-4 text-center">
-                            <button onclick="openModal('${coin.koin}', ${coin.amount}, ${coin.entry})" class="bg-indigo-600/10 text-indigo-400 hover:bg-indigo-600/30 border border-indigo-500/20 px-2.5 py-1 rounded text-xs font-bold transition">Manage</button>
-                        </td>
-                        <td class="p-4 text-center">
-                            <button onclick="sendTelegramManual(this, '${coin.koin}')" class="bg-amber-600/10 text-amber-400 hover:bg-amber-600/30 border border-amber-500/20 px-2.5 py-1 rounded text-xs font-bold transition flex items-center gap-1 mx-auto">✈️ Send</button>
-                        </td>
-                        <td class="p-4 text-center">
-                            <span class="border px-2.5 py-1 rounded-md text-xs font-mono font-bold inline-block ${statusBadgeClass}">● ${coin.status_aksi}</span>
-                        </td>
-                        <td class="p-4">${performanceContent}</td>
-                        <td class="p-4 font-mono text-right text-xs">${strategicBlock}</td>
-                    </tr>
-                `;
-            });
+            localStorage.setItem('quantum_portfolio_v26', JSON.stringify(portfolio));
             
-            tbody.innerHTML = rowsHtml || `<tr><td colspan="7" class="p-8 text-center text-gray-500 font-mono">Asset not found...</td></tr>`;
+            document.getElementById('input-coin').value = '';
+            document.getElementById('input-amount').value = '';
+            document.getElementById('input-price').value = '';
+            
+            updateDashboardData();
+        }
+
+        function removeAsset(coinKey) {
+            let portfolio = getLocalPortfolio();
+            if (portfolio[coinKey]) {
+                delete portfolio[coinKey];
+                localStorage.setItem('quantum_portfolio_v26', JSON.stringify(portfolio));
+                updateDashboardData();
+            }
+        }
+
+        function clearAllAssets() {
+            if (confirm('Apakah Anda yakin ingin menghapus seluruh aset portofolio/watchlist lokal?')) {
+                localStorage.removeItem('quantum_portfolio_v26');
+                updateDashboardData();
+            }
+        }
+
+        function triggerManualSignalAlert(coinSymbol) {
+            const coinData = globalCachedData.find(item => item.koin === coinSymbol);
+            if (!coinData) return;
+
+            if (!confirm(`Broadcast data analisa untuk koin ${coinSymbol} ke group telegram?`)) return;
+
+            fetch('/api/telegram/send_manual', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(coinData)
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (data.status === 'success') alert('Signal broadcasted successfully!');
+                else alert('Error: ' + data.message);
+            })
+            .catch(err => alert('Network pipeline broadcast failed.'));
+        }
+
+        // KONEKSI WEBSOCKET LANGSUNG KE BINANCE UNTUK UPDATE HARGA TIAP DETIK
+        function connectPriceWebSocket(coinSymbols) {
+            if (webSocketInstance) {
+                webSocketInstance.close();
+            }
+
+            if (!coinSymbols || coinSymbols.length === 0) return;
+
+            // Buat stream nama parameter gabungan (contoh: btcusdt@ticker / ethusdt@ticker)
+            const streams = coinSymbols.map(sym => `${sym.toLowerCase()}usdt@ticker`).join('/');
+            const wsUrl = `wss://stream.binance.com:9443/ws/${streams}`;
+
+            webSocketInstance = new WebSocket(wsUrl);
+
+            webSocketInstance.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                const rawSymbol = data.s; // Contoh: BTCUSDT
+                const currentPrice = parseFloat(data.c); // Harga penutupan terbaru
+
+                // Cari data koin di dalam cache memori lokal browser
+                const cleanCoinName = rawSymbol.replace("USDT", "");
+                const coinObj = globalCachedData.find(item => item.koin === cleanCoinName);
+
+                if (coinObj) {
+                    // Update harga instant dan kalkulasi ulang dinamika PnL di frontend setiap detik
+                    coinObj.harga = currentPrice;
+                    
+                    if (coinObj.is_portfolio && coinObj.entry > 0 && coinObj.amount > 0) {
+                        coinObj.current_value = coinObj.amount * currentPrice;
+                        const initialVal = coinObj.amount * coinObj.entry;
+                        coinObj.pnl_val = coinObj.current_value - initialVal;
+                        coinObj.pnl_pct = (coinObj.pnl_val / initialVal) * 100;
+
+                        // Perbarui status aksi secara instan berdasarkan pergerakan harga per detik
+                        const targetTp = coinObj.entry + (2.0 * coinObj.atr);
+                        const targetCl = coinObj.entry - (1.5 * coinObj.atr);
+
+                        if (currentPrice >= targetTp) coinObj.status_aksi = "TAKE PROFIT";
+                        else if (currentPrice <= targetCl) coinObj.status_aksi = "CUT LOSS";
+                    }
+                    
+                    // Render ulang hanya baris tabel secara cepat tanpa merusak DOM utama
+                    renderTableRows(globalCachedData);
+                }
+            };
+
+            webSocketInstance.onerror = (err) => {
+                console.error("WebSocket Price Stream Error:", err);
+            };
+        }
+
+        function renderTableRows(coins) {
+            const tbody = document.getElementById('market-table-body');
+            tbody.innerHTML = '';
+
+            let totalPortfolioValue = 0;
+            let totalInitialCost = 0;
+            let activePortfolioCount = 0;
+
+            if (!coins || coins.length === 0) {
+                tbody.innerHTML = `<tr><td colspan="10" class="p-8 text-center text-gray-500 font-mono">No active coins found in the system matrix.</td></tr>`;
+                return;
+            }
+
+            coins.forEach(coin => {
+                const isPortfolio = coin.is_portfolio === true;
+                
+                const priceFmt = coin.harga < 1.0 ? `$${coin.harga.toFixed(7)}` : `$${coin.harga.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 })}`;
+                const entryFmt = coin.entry > 0 ? (coin.entry < 1.0 ? `$${coin.entry.toFixed(7)}` : `$${coin.entry.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 })}`) : '-';
+                
+                if (isPortfolio && coin.amount > 0 && coin.entry > 0) {
+                    totalPortfolioValue += coin.current_value || 0;
+                    totalInitialCost += (coin.amount * coin.entry);
+                    activePortfolioCount++;
+                }
+
+                const changeColor = coin.persen_harga >= 0 ? 'text-emerald-400 font-semibold' : 'text-rose-400 font-semibold';
+                const changeSign = coin.persen_harga >= 0 ? '+' : '';
+
+                let speedClass = 'text-gray-400';
+                if (coin.rasio >= 2.5) speedClass = 'text-cyan-400 font-black animate-pulse';
+                else if (coin.rasio >= 1.5) speedClass = 'text-emerald-400 font-bold';
+
+                let phaseBadgeClass = 'bg-slate-900 text-slate-400 border-slate-800';
+                if (coin.fase === 'INSTITUTIONAL BUY') phaseBadgeClass = 'bg-emerald-950/40 text-emerald-300 border-emerald-500/30 font-black tracking-wide';
+                if (coin.fase === 'VALID BREAKOUT') phaseBadgeClass = 'bg-cyan-950/40 text-cyan-300 border-cyan-500/30 font-bold';
+                if (coin.fase === 'EARLY RALLY') phaseBadgeClass = 'bg-indigo-950/40 text-indigo-300 border-indigo-500/20';
+                if (coin.fase === 'OVERBOUGHT PEAK') phaseBadgeClass = 'bg-amber-950/40 text-amber-300 border-amber-500/30';
+                if (coin.fase === 'EARLY DOWNTREND') phaseBadgeClass = 'bg-rose-950/40 text-rose-300 border-rose-500/30';
+                if (coin.fase.includes('ENGINE LOCKED')) phaseBadgeClass = 'bg-orange-950/40 text-orange-300 border-orange-500/30';
+
+                let statusBadgeClass = 'border-slate-800 text-slate-400 bg-slate-950/40';
+                if (coin.status_aksi === 'BUY STAGE') statusBadgeClass = 'border-emerald-500/30 text-emerald-400 bg-emerald-950/20';
+                if (coin.status_aksi === 'TAKE PROFIT') statusBadgeClass = 'border-amber-500/40 text-amber-400 bg-amber-950/30 font-bold animate-bounce';
+                if (coin.status_aksi === 'APPROACHING TP') statusBadgeClass = 'border-cyan-500/40 text-cyan-400 bg-cyan-950/30 font-semibold animate-pulse';
+                if (coin.status_aksi === 'HOLDING (PROFIT)') statusBadgeClass = 'border-emerald-500/20 text-emerald-500/90 bg-emerald-950/10';
+                if (coin.status_aksi === 'HOLD (DRAWDOWN)') statusBadgeClass = 'border-slate-700 text-slate-400 bg-slate-900/20';
+                if (coin.status_aksi === 'NEARING CL') statusBadgeClass = 'border-orange-500/50 text-orange-400 bg-orange-950/40 font-bold animate-pulse';
+                if (coin.status_aksi === 'CUT LOSS') statusBadgeClass = 'border-rose-500/50 text-rose-400 bg-rose-950/30 font-bold';
+
+                let pnlString = '-';
+                if (isPortfolio && coin.entry > 0 && coin.amount > 0) {
+                    const sign = coin.pnl_val >= 0 ? '+' : '';
+                    const pnlColor = coin.pnl_val >= 0 ? 'text-emerald-400' : 'text-rose-400';
+                    pnlString = `<div class="${pnlColor} font-mono font-bold">${sign}${(coin.pnl_val || 0).toFixed(2)}</div><div class="${pnlColor} text-[10px] opacity-70 font-mono">${sign}${(coin.pnl_pct || 0).toFixed(2)}%</div>`;
+                }
+
+                const tr = document.createElement('tr');
+                tr.className = isPortfolio 
+                    ? 'bg-indigo-950/15 hover:bg-indigo-950/25 border-l-2 border-indigo-500 transition-colors' 
+                    : 'hover:bg-slate-900/40 transition-colors';
+
+                tr.innerHTML = `
+                    <td class="p-4 font-bold tracking-wider text-slate-200 flex items-center justify-between group">
+                        <div class="flex items-center gap-2">
+                            <span>${coin.koin}</span>
+                            ${isPortfolio ? '<span class="text-[9px] bg-indigo-500/20 text-indigo-400 border border-indigo-500/30 px-1 rounded font-sans font-semibold">PORTFOLIO</span>' : ''}
+                        </div>
+                        ${isPortfolio ? `<button onclick="removeAsset('${coin.koin}')" class="text-slate-600 hover:text-rose-400 ml-2 hidden group-hover:inline cursor-pointer" title="Delete Asset">✕</button>` : ''}
+                    </td>
+                    <td class="p-4 text-right font-mono text-slate-300 font-medium">${priceFmt}</td>
+                    <td class="p-4 text-right font-mono ${changeColor}">${changeSign}${coin.persen_harga.toFixed(2)}%</td>
+                    <td class="p-4 text-right font-mono ${speedClass}">${coin.rasio.toFixed(1)}x</td>
+                    <td class="p-4 text-center">
+                        <span class="px-2 py-1 rounded border text-[10px] font-mono ${phaseBadgeClass}">
+                            ${coin.fase}
+                        </span>
+                    </td>
+                    <td class="p-4 text-center">
+                        <span class="px-2 py-1 rounded border text-[10px] font-mono ${statusBadgeClass}">
+                            ${coin.status_aksi}
+                        </span>
+                    </td>
+                    <td class="p-4 text-right font-mono text-slate-400">${isPortfolio && coin.amount > 0 ? coin.amount : '-'}</td>
+                    <td class="p-4 text-right font-mono text-slate-400">${entryFmt}</td>
+                    <td class="p-4 text-right">${pnlString === '-' ? '<div class="text-gray-600 font-mono">-</div>' : pnlString}</td>
+                    <td class="p-4 text-center">
+                        <button onclick="triggerManualSignalAlert('${coin.koin}')" class="bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-400 hover:text-cyan-400 p-1.5 rounded transition-all cursor-pointer text-xs" title="Broadcast Signal">
+                            ✈️
+                        </button>
+                    </td>
+                `;
+                tbody.appendChild(tr);
+            });
+
+            document.getElementById('summary-total-val').innerText = `$${totalPortfolioValue.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+            document.getElementById('summary-active-count').innerText = `${activePortfolioCount} Assets`;
+            
+            const netPnLVal = totalPortfolioValue - totalInitialCost;
+            const netPnLPct = totalInitialCost > 0 ? (netPnLVal / totalInitialCost) * 100 : 0.0;
+            
+            const pnlValElement = document.getElementById('summary-pnl-val');
+            const pnlPctElement = document.getElementById('summary-pnl-pct');
+
+            if (totalInitialCost > 0) {
+                const sign = netPnLVal >= 0 ? '+' : '';
+                pnlValElement.innerText = `${sign}$${netPnLVal.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+                pnlPctElement.innerText = `${sign}${netPnLPct.toFixed(2)}%`;
+                
+                if (netPnLVal >= 0) {
+                    pnlValElement.className = "text-lg font-black font-mono mt-2 block text-emerald-400";
+                    pnlPctElement.className = "text-lg font-black font-mono mt-2 block text-emerald-400";
+                } else {
+                    pnlValElement.className = "text-lg font-black font-mono mt-2 block text-rose-400";
+                    pnlPctElement.className = "text-lg font-black font-mono mt-2 block text-rose-400";
+                }
+            } else {
+                pnlValElement.innerText = '$0.00';
+                pnlValElement.className = "text-lg font-black font-mono mt-2 block text-gray-500";
+                pnlPctElement.innerText = '0.00%';
+                pnlPctElement.className = "text-lg font-black font-mono mt-2 block text-gray-500";
+            }
         }
 
         async function updateDashboardData() {
+            const currentLocalPortfolio = getLocalPortfolio();
             try {
-                let currentLocalPortfolio = getLocalPortfolio();
-                if (!currentLocalPortfolio || typeof currentLocalPortfolio !== 'object') {
-                    currentLocalPortfolio = {};
-                    saveLocalPortfolio(currentLocalPortfolio);
-                }
-                
-                // PERBAIKAN: Ambil token ID unik browser saat ini
-                const currentDeviceId = getOrCreateDeviceID();
-                
                 const response = await fetch('/api/data', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    // PERBAIKAN: Kirimkan device_id bersama dengan payload data portfolio
-                    body: JSON.stringify({ 
-                        device_id: currentDeviceId,
-                        portfolio: currentLocalPortfolio 
-                    })
+                    body: JSON.stringify({ device_id: clientDeviceUUID, portfolio: currentLocalPortfolio })
                 });
                 
                 if (!response.ok) {
@@ -375,7 +387,7 @@
                 
                 const btc = rootData.btc_status;
                 const btcBadge = document.getElementById('btc-badge');
-                if(btc && btc.is_safe) {
+                if (btc && btc.is_safe) {
                     btcBadge.className = "text-xs font-mono px-3 py-1.5 rounded-xl border border-emerald-900/40 bg-emerald-950/20 text-emerald-400";
                     btcBadge.innerText = `● ${btc.reason}`;
                 } else if (btc) {
@@ -386,14 +398,19 @@
                 globalCachedData = rootData.market || [];
                 renderTableRows(globalCachedData);
                 
-                document.getElementById('sync-status').innerText = 'QUANTUM SECURE BROWSER ENGINE LIVE';
+                // Hubungkan WebSocket untuk koin yang aktif dalam daftar setelah data backend diterima
+                const uniqueCoins = globalCachedData.map(c => c.koin);
+                connectPriceWebSocket(uniqueCoins);
+
+                document.getElementById('sync-status').innerText = 'QUANTUM LIVE SECURE ENGINE (WEBSOCKET ENGAGED)';
             } catch (err) {
                 console.error(err);
                 document.getElementById('sync-status').innerText = 'CORE CONNECTION LOST (RETRYING)';
             }
         }
 
-        setInterval(updateDashboardData, 4000);
+        // Sinkronisasi data struktur dan fase berat dari backend diturunkan menjadi setiap 12 detik
+        setInterval(updateDashboardData, 12000);
         updateDashboardData();
     </script>
 </body>
