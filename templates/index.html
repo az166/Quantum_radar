@@ -41,7 +41,7 @@
                     <input type="text" id="new-coin-name" placeholder="Enter coin symbol (e.g. SOL)..." class="w-full bg-black/50 border border-gray-800 px-3 py-2 rounded-lg text-white font-bold text-sm focus:outline-none focus:border-cyan-500 uppercase">
                 </div>
                 <div class="w-full sm:w-auto">
-                    <button onclick="addNewCustomCoin()" class="w-full sm:w-max bg-gradient-to-r from-cyan-600 to-indigo-600 text-white hover:from-cyan-500 hover:to-indigo-500 px-5 py-2 rounded-lg text-xs font-bold transition shadow-lg h-9">
+                    <button onclick="addNewCustomCoin()" class="w-full sm:w-max bg-gradient-to-r from-cyan-600 to-indigo-600 text-white hover:from-cyan-500 hover:to-indigo-500 px-5 py-2 rounded-lg text-xs font-bold transition shadow-lg h-9 cursor-pointer">
                         + Add Asset
                     </button>
                 </div>
@@ -86,7 +86,7 @@
         <div class="bg-slate-900 border border-slate-800 p-6 rounded-xl w-full max-w-md shadow-2xl">
             <div class="flex justify-between items-center mb-4">
                 <h3 class="text-base font-bold text-white">Manage Asset Parameters: <span id="modal-coin-title" class="text-cyan-400"></span></h3>
-                <button onclick="deleteAssetFromCache()" class="bg-rose-600/20 text-rose-400 hover:bg-rose-600/40 border border-rose-500/30 px-2 py-1 rounded text-xs font-bold transition">
+                <button onclick="deleteAssetFromCache()" class="bg-rose-600/20 text-rose-400 hover:bg-rose-600/40 border border-rose-500/30 px-2 py-1 rounded text-xs font-bold transition cursor-pointer">
                     🗑 Delete Asset
                 </button>
             </div>
@@ -101,8 +101,8 @@
                 </div>
             </div>
             <div class="flex justify-end gap-2 mt-5">
-                <button onclick="closeModal()" class="px-4 py-2 bg-slate-800 text-slate-300 text-xs rounded font-bold transition hover:bg-slate-700">Cancel</button>
-                <button onclick="saveModalDataToCache()" class="px-4 py-2 bg-cyan-600 text-white text-xs rounded font-bold transition hover:bg-cyan-500">Save Parameters</button>
+                <button onclick="closeModal()" class="px-4 py-2 bg-slate-800 text-slate-300 text-xs rounded font-bold transition hover:bg-slate-700 cursor-pointer">Cancel</button>
+                <button onclick="saveModalDataToCache()" class="px-4 py-2 bg-cyan-600 text-white text-xs rounded font-bold transition hover:bg-cyan-500 cursor-pointer">Save Parameters</button>
             </div>
         </div>
     </div>
@@ -110,6 +110,7 @@
     <script>
         let currentTargetCoin = "";
         let globalCachedData = [];
+        let binanceWS = null;
 
         function getOrCreateDeviceID() {
             let id = localStorage.getItem('quantum_device_id');
@@ -208,7 +209,7 @@
                     btn.className = "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 px-2.5 py-1 rounded text-xs font-bold";
                     btn.innerHTML = "✓ Sent";
                     setTimeout(() => {
-                        btn.className = "bg-amber-600/10 text-amber-400 hover:bg-amber-600/30 border border-amber-500/20 px-2.5 py-1 rounded text-xs font-bold transition flex items-center justify-center gap-1 mx-auto";
+                        btn.className = "bg-amber-600/10 text-amber-400 hover:bg-amber-600/30 border border-amber-500/20 px-2.5 py-1 rounded text-xs font-bold transition flex items-center justify-center gap-1 mx-auto cursor-pointer";
                         btn.innerHTML = originalHtml;
                         btn.disabled = false;
                     }, 3000);
@@ -225,6 +226,118 @@
         }
 
         function handleSearchFilter() { renderTableRows(globalCachedData); }
+
+        // ==================== LIVE REALTIME WEBSOCKET MANAGER ====================
+        function initBinanceWebSocket(coins) {
+            if (binanceWS) {
+                try { binanceWS.close(); } catch(e) {}
+            }
+
+            if (!coins || coins.length === 0) return;
+
+            // Membuka koneksi multiplex stream resmi dari Binance
+            const streams = coins.map(c => `${c.koin.toLowerCase()}usdt@ticker`).join('/');
+            const wsUrl = `wss://stream.binance.com:9443/stream?streams=${streams}`;
+
+            binanceWS = new WebSocket(wsUrl);
+
+            binanceWS.onmessage = (event) => {
+                try {
+                    const msgData = JSON.parse(event.data);
+                    const tickerData = msgData.data;
+
+                    if (!tickerData) return;
+
+                    const coinSymbol = tickerData.s.replace('USDT', '');
+                    const livePrice = parseFloat(tickerData.c); 
+                    const priceChangePct = parseFloat(tickerData.P); 
+
+                    // Sinkronisasi data ke dalam memory cache lokal browser
+                    const cachedCoin = globalCachedData.find(c => c.koin === coinSymbol);
+                    if (cachedCoin) {
+                        cachedCoin.harga = livePrice;
+                        cachedCoin.persen_harga = priceChangePct;
+
+                        if (cachedCoin.is_portfolio && cachedCoin.entry > 0 && cachedCoin.amount > 0) {
+                            cachedCoin.current_value = cachedCoin.amount * livePrice;
+                            const initialVal = cachedCoin.amount * cachedCoin.entry;
+                            cachedCoin.pnl_val = cachedCoin.current_value - initialVal;
+                            cachedCoin.pnl_pct = (cachedCoin.pnl_val / initialVal) * 100;
+
+                            if (livePrice >= cachedCoin.tp) cachedCoin.status_aksi = "TAKE PROFIT";
+                            else if (livePrice <= cachedCoin.cl) cachedCoin.status_aksi = "CUT LOSS";
+                            else cachedCoin.status_aksi = "HOLDING";
+                        }
+
+                        // Kirim data baru ke DOM target secara parsial
+                        updateSingleRowDOM(cachedCoin);
+                    }
+                } catch (err) {
+                    // Fail-safe untuk mengabaikan parsing error pada stream cepat
+                }
+            };
+
+            binanceWS.onerror = (err) => { console.error("WebSocket Error: ", err); };
+            binanceWS.onclose = () => {
+                setTimeout(() => { initBinanceWebSocket(globalCachedData); }, 5000);
+            };
+        }
+
+        function updateSingleRowDOM(coin) {
+            const rowId = `row-coin-${coin.koin}`;
+            const tr = document.getElementById(rowId);
+            if (!tr) return;
+
+            // 1. Perbarui Kolom Harga & Persen Live
+            const priceTd = tr.querySelector('.cell-live-price');
+            if (priceTd) {
+                const priceChangeClass = coin.persen_harga >= 0 ? 'text-emerald-400' : 'text-rose-400';
+                const sign = coin.persen_harga >= 0 ? '+' : '';
+                priceTd.innerHTML = `
+                    <div class="text-white font-bold truncate">${formatQuantumPrice(coin.harga)}</div>
+                    <div class="text-xs ${priceChangeClass} font-bold mt-0.5 truncate">${sign}${coin.persen_harga.toFixed(2)}%</div>
+                `;
+            }
+
+            // 2. Perbarui Kolom Plan Status
+            const statusSpan = tr.querySelector('.cell-plan-status span');
+            if (statusSpan) {
+                let statusBadgeClass = 'border-gray-800 text-gray-400';
+                if (coin.status_aksi === 'BUY STAGE') statusBadgeClass = 'border-emerald-500/30 text-emerald-400 bg-emerald-950/20';
+                if (coin.status_aksi === 'TAKE PROFIT') statusBadgeClass = 'border-amber-500/30 text-amber-400 bg-amber-950/20';
+                if (coin.status_aksi === 'CUT LOSS') statusBadgeClass = 'border-rose-500/40 text-rose-400 bg-rose-950/20';
+                if (coin.status_aksi === 'HOLDING') statusBadgeClass = 'border-emerald-500/20 text-emerald-500/90 bg-emerald-950/10';
+
+                statusSpan.className = `border px-2 py-1 rounded-md text-[11px] font-mono font-bold block w-full truncate ${statusBadgeClass}`;
+                statusSpan.innerText = `● ${coin.status_aksi}`;
+            }
+
+            // 3. Perbarui Kolom Progress Bar & PnL Akurat
+            const performanceTd = tr.querySelector('.cell-performance');
+            if (performanceTd && coin.is_portfolio && coin.entry > 0) {
+                let progressPct = 0;
+                if (coin.tp > coin.entry && coin.harga >= coin.entry) {
+                    progressPct = Math.min(100, ((coin.harga - coin.entry) / (coin.tp - coin.entry)) * 100);
+                }
+                const pnlColor = coin.pnl_val >= 0 ? 'text-emerald-400' : 'text-rose-400';
+                const pnlSign = coin.pnl_val >= 0 ? '+' : '';
+                performanceTd.innerHTML = `
+                    <div class="flex flex-col gap-1 w-full max-w-[160px]">
+                        <div class="flex items-center gap-2">
+                            <div class="w-full bg-gray-950 rounded-full h-1.5 overflow-hidden border border-gray-800">
+                                <div class="bg-gradient-to-r from-cyan-500 to-indigo-500 h-1.5 rounded-full" style="width: ${progressPct}%"></div>
+                            </div>
+                            <span class="text-xs font-mono font-bold text-cyan-400">${progressPct.toFixed(0)}%</span>
+                        </div>
+                        <div class="text-xs font-mono flex justify-between gap-1 overflow-hidden">
+                            <span class="text-gray-400 truncate">Hold: $${(coin.current_value || 0).toFixed(2)}</span>
+                            <span class="${pnlColor} font-bold truncate">${pnlSign}${(coin.pnl_pct || 0).toFixed(1)}%</span>
+                        </div>
+                    </div>
+                `;
+            }
+        }
+        // =========================================================================
 
         function renderTableRows(coins) {
             const tbody = document.getElementById('market-rows');
@@ -260,8 +373,7 @@
 
                 let progressPct = 0;
                 if (coin.tp > coin.entry && coin.harga >= coin.entry) {
-                    progressPct = ((coin.harga - coin.entry) / (coin.tp - coin.entry)) * 100;
-                    if (progressPct > 100) progressPct = 100;
+                    progressPct = Math.min(100, ((coin.harga - coin.entry) / (coin.tp - coin.entry)) * 100);
                 }
 
                 let performanceContent = '';
@@ -313,7 +425,7 @@
                 }
 
                 rowsHtml += `
-                    <tr class="${isPortfolioStyle} hover:bg-gray-900/40 transition border-b border-gray-900 h-16">
+                    <tr id="row-coin-${coin.koin}" class="${isPortfolioStyle} hover:bg-gray-900/40 transition border-b border-gray-900 h-16">
                         <td class="p-4 overflow-hidden">
                             <div class="flex items-center gap-1.5 w-full">
                                 <span class="text-xs flex-shrink-0">${coin.is_portfolio ? '⚡' : '🔍'}</span>
@@ -323,7 +435,7 @@
                             </div>
                             <div class="text-xs ${faseColorClass} mt-1 uppercase tracking-wider font-semibold truncate" title="${faseLabel}">${faseLabel}</div>
                         </td>
-                        <td class="p-4 font-mono overflow-hidden">
+                        <td class="p-4 font-mono overflow-hidden cell-live-price">
                             <div class="text-white font-bold truncate">${formatQuantumPrice(coin.harga)}</div>
                             <div class="text-xs ${priceChangeClass} font-bold mt-0.5 truncate">${coin.persen_harga >= 0 ? '+' : ''}${(coin.persen_harga || 0).toFixed(2)}%</div>
                         </td>
@@ -333,10 +445,10 @@
                         <td class="p-4 text-center overflow-hidden">
                             <button onclick="sendTelegramManual(this, '${coin.koin}')" class="bg-amber-600/10 text-amber-400 hover:bg-amber-600/30 border border-amber-500/20 px-2 py-1 rounded text-xs font-bold transition flex items-center justify-center gap-1 w-full cursor-pointer truncate">✈️ Send</button>
                         </td>
-                        <td class="p-4 text-center overflow-hidden">
+                        <td class="p-4 text-center overflow-hidden cell-plan-status">
                             <span class="border px-2 py-1 rounded-md text-[11px] font-mono font-bold block w-full truncate ${statusBadgeClass}">● ${coin.status_aksi}</span>
                         </td>
-                        <td class="p-4 overflow-hidden">${performanceContent}</td>
+                        <td class="p-4 overflow-hidden cell-performance">${performanceContent}</td>
                         <td class="p-4 font-mono text-right text-xs overflow-hidden">${strategicBlock}</td>
                     </tr>
                 `;
@@ -366,7 +478,7 @@
                 
                 if (!response.ok) {
                     document.getElementById('sync-status').innerText = 'SERVER ERROR (' + response.status + ')';
-                    setTimeout(updateDashboardData, 15000); 
+                    setTimeout(updateDashboardData, 20000); 
                     return;
                 }
                 const rootData = await response.json();
@@ -381,8 +493,16 @@
                     btcBadge.innerText = `⚠️ ${btc.reason}`;
                 }
 
+                const isFirstLoad = globalCachedData.length === 0;
                 globalCachedData = rootData.market || [];
-                renderTableRows(globalCachedData);
+                
+                // Hanya render seluruh tabel jika ini adalah muatan data pertama
+                if (isFirstLoad) {
+                    renderTableRows(globalCachedData);
+                }
+
+                // Inisialisasi dan hubungkan ulang pipa WebSocket ke Binance
+                initBinanceWebSocket(globalCachedData);
                 
                 if (globalCachedData.length > 0) {
                     document.getElementById('sync-status').innerText = 'QUANTUM SECURE BROWSER ENGINE LIVE';
@@ -394,7 +514,8 @@
                 document.getElementById('sync-status').innerText = 'CORE CONNECTION LOST (RETRYING)';
             }
             
-            setTimeout(updateDashboardData, 15000);
+            // Pengambilan kalkulasi indikator rumit (MA, MACD, ATR) dijadwalkan per 20 detik
+            setTimeout(updateDashboardData, 20000);
         }
 
         // Jalankan sinkronisasi pertama kali saat halaman dimuat
