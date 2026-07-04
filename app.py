@@ -2,7 +2,7 @@ from flask import Flask, render_template, jsonify, request
 import httpx
 import asyncio
 import time
-from threading import Thread
+from threading import Thread, Lock
 
 app = Flask(__name__)
 
@@ -11,9 +11,9 @@ MARKET_DATA_CACHE = []
 LAST_ALERTS_STATE = {}
 ENGINE_INITIALIZED = False
 
-# variabel optimasi untuk mendeteksi cache kedalwarsa (TTL)
+# Variabel optimasi untuk mendeteksi cache kedaluwarsa (TTL)
 LAST_SUCCESSFUL_SCAN_TIME = 0
-CACHE_TTL_SECONDS = 120  # Maksimal 2 menit data dianggap valid jika engine macet
+CACHE_TTL_SECONDS = 120  
 
 # Set pencarian cepat O(1) untuk menyaring koin hitam (Blacklist)
 COIN_BLACKLIST = {'UPUSDT', 'DOWNUSDT', 'BUSDUSDT', 'USDCUSDT', 'FDUSDUSDT', 'EURUSDT'}
@@ -26,25 +26,16 @@ TELEGRAM_CHAT_ID = "@cryptoradar_quantum"
 LIVE_PRICE_MAP = {}
 GLOBAL_BTC_STATUS = {"is_safe": True, "reason": "Connecting"}
 
-# Mengubah struktur menjadi nested dictionary untuk mendukung isolasi multi-device
-# Format data: { "device_id_1": {"SOL": {...}}, "device_id_2": {"BTC": {...}} }
+# Struktur data multi-device: { "device_id_1": {"SOL": {...}}, "device_id_2": {"BTC": {...}} }
 GLOBAL_PORTFOLIO_DYNAMICS = {} 
 
-ASYNC_CLIENT_POOL = None
-
-def get_async_client():
-    global ASYNC_CLIENT_POOL
-    if ASYNC_CLIENT_POOL is None or ASYNC_CLIENT_POOL.is_closed:
-        ASYNC_CLIENT_POOL = httpx.AsyncClient(
-            limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
-            timeout=httpx.Timeout(5.0)
-        )
-    return ASYNC_CLIENT_POOL
+# Lock thread-safe untuk mengamankan manipulasi data global antar thread Flask
+data_lock = Lock()
 
 def send_telegram_alert_sync(message):
     if not TELEGRAM_TOKEN or "ENTER_TOKEN" in TELEGRAM_TOKEN:
         return False
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    url = f"https://api.telegram.com/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
     try:
         with httpx.Client() as client:
@@ -67,15 +58,17 @@ async def check_bitcoin_circuit_breaker(client):
             btc_open_1h = float(klines[-1][1])
             btc_change_1h = ((live_btc - btc_open_1h) / btc_open_1h) * 100
             
-            if btc_change_1h <= -1.5:
-                GLOBAL_BTC_STATUS = {"is_safe": False, "reason": f"BTC DUMP ({btc_change_1h:.1f}%)"}
-            elif live_btc < btc_ma24:
-                GLOBAL_BTC_STATUS = {"is_safe": False, "reason": "BTC BEARISH (Below MA24)"}
-            else:
-                GLOBAL_BTC_STATUS = {"is_safe": True, "reason": "BTC SAFE"}
+            with data_lock:
+                if btc_change_1h <= -1.5:
+                    GLOBAL_BTC_STATUS = {"is_safe": False, "reason": f"BTC DUMP ({btc_change_1h:.1f}%)"}
+                elif live_btc < btc_ma24:
+                    GLOBAL_BTC_STATUS = {"is_safe": False, "reason": "BTC BEARISH (Below MA24)"}
+                else:
+                    GLOBAL_BTC_STATUS = {"is_safe": True, "reason": "BTC SAFE"}
     except Exception as e:
         print(f"Error checking BTC status: {e}")
-        GLOBAL_BTC_STATUS = {"is_safe": True, "reason": "BTC CHECK DELAYED"}
+        with data_lock:
+            GLOBAL_BTC_STATUS = {"is_safe": True, "reason": "BTC CHECK DELAYED"}
 
 async def get_combined_tickers_data_async(client):
     url = "https://api.binance.com/api/v3/ticker/24hr"
@@ -90,7 +83,8 @@ async def get_combined_tickers_data_async(client):
                 symbol = t['symbol']
                 if symbol.endswith('USDT') and (symbol not in COIN_BLACKLIST):
                     live_p = float(t['lastPrice'])
-                    LIVE_PRICE_MAP[symbol] = live_p
+                    with data_lock:
+                        LIVE_PRICE_MAP[symbol] = live_p
                     
                     filtered_list.append({
                         "symbol": symbol,
@@ -101,11 +95,11 @@ async def get_combined_tickers_data_async(client):
             filtered_list.sort(key=lambda x: x['pure_vol_24h'], reverse=True)
             top_50_symbols = [item['symbol'] for item in filtered_list[:50]]
             
-            # PERBAIKAN: Menggabungkan seluruh data koin dari semua device terdaftar tanpa bentrok
             portfolio_symbols = []
-            for dev_id, proto_data in GLOBAL_PORTFOLIO_DYNAMICS.items():
-                if isinstance(proto_data, dict):
-                    portfolio_symbols.extend([f"{coin}USDT" for coin in proto_data.keys()])
+            with data_lock:
+                for dev_id, proto_data in GLOBAL_PORTFOLIO_DYNAMICS.items():
+                    if isinstance(proto_data, dict):
+                        portfolio_symbols.extend([f"{coin}USDT" for coin in proto_data.keys()])
                 
             target_symbols = list(set(top_50_symbols + portfolio_symbols))
             
@@ -116,9 +110,10 @@ async def get_combined_tickers_data_async(client):
                         "price_change_pct_24h": item['price_change_pct_24h']
                     }
             
-            for sym in target_symbols:
-                if sym not in LIVE_PRICE_MAP:
-                    LIVE_PRICE_MAP[sym] = 0.0
+            with data_lock:
+                for sym in target_symbols:
+                    if sym not in LIVE_PRICE_MAP:
+                        LIVE_PRICE_MAP[sym] = 0.0
 
             return ticker_dict
     except Exception as e:
@@ -215,7 +210,9 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
             w1_close, w2_close = float(klines_1w[-2][4]), float(klines_1w[-3][4])
             is_macro_bullish = w1_close >= w2_close  
             
-            live_price = LIVE_PRICE_MAP.get(symbol, float(klines_1h[-1][4]))
+            with data_lock:
+                live_price = LIVE_PRICE_MAP.get(symbol, float(klines_1h[-1][4]))
+            
             open_price = float(klines_1h[-1][1])
             price_pct_1h = ((live_price - open_price) / open_price) * 100
             atr, spread_ratio = calculate_atr_and_spread(klines_1d, klines_1h)
@@ -270,9 +267,13 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
             elif is_whale_churning and price_pct_1h > 0:
                 fase = "WHALE CHURNING (HIGH RISK)"
 
-            if not GLOBAL_BTC_STATUS["is_safe"] and coin_name not in user_portfolio:
+            with data_lock:
+                current_btc_safe = GLOBAL_BTC_STATUS["is_safe"]
+                btc_reason = GLOBAL_BTC_STATUS["reason"]
+
+            if not current_btc_safe and coin_name not in user_portfolio:
                 status_rencana_otomatis = "WAIT & SEE"
-                fase = f"ENGINE LOCKED ({GLOBAL_BTC_STATUS['reason']})"
+                fase = f"ENGINE LOCKED ({btc_reason})"
             else:
                 if fase in ["INSTITUTIONAL BUY", "VALID BREAKOUT", "EARLY RALLY", "EARLY RALLY (WEAK VOL)"]:
                     status_rencana_otomatis = "BUY STAGE"
@@ -284,7 +285,7 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
             harga_terformat = f"${live_price:.8f}" if live_price < 1.0 else f"${live_price:.4f}"
             
             if coin_name not in LAST_ALERTS_STATE or LAST_ALERTS_STATE[coin_name] != fase:
-                if fase in ["VALID BREAKOUT", "INSTITUTIONAL BUY"] and GLOBAL_BTC_STATUS["is_safe"] and vol_spike_ratio >= 2.5:
+                if fase in ["VALID BREAKOUT", "INSTITUTIONAL BUY"] and current_btc_safe and vol_spike_ratio >= 2.5:
                     emoji = "👑 BRAND NEW MSB!" if fase == "INSTITUTIONAL BUY" else "🔥 BREAKOUT SPIKE"
                     send_telegram_alert_sync(
                         f"{emoji}\n\nCoin: *{coin_name}*\nMarket Structure: `BREAKOUT RESISTANCE`\n"
@@ -340,31 +341,36 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
 async def execute_one_market_scan(target_device_id=None):
     global MARKET_DATA_CACHE, LAST_SUCCESSFUL_SCAN_TIME
     
-    client = get_async_client()
-    try:
-        semaphore = asyncio.Semaphore(4)  
-        await check_bitcoin_circuit_breaker(client)
-        ticker_master_data = await get_combined_tickers_data_async(client)
-        
-        if not ticker_master_data:
-            return
+    # PERBAIKAN: Client baru dibuat lokal per siklus agar tidak bentrok antar event loop
+    async with httpx.AsyncClient(
+        limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
+        timeout=httpx.Timeout(5.0)
+    ) as client:
+        try:
+            semaphore = asyncio.Semaphore(4)  
+            await check_bitcoin_circuit_breaker(client)
+            ticker_master_data = await get_combined_tickers_data_async(client)
             
-        # PERBAIKAN: Gunakan portofolio yang terisolasi dari device pengirim request (jika ada)
-        active_portfolio = {}
-        if target_device_id and target_device_id in GLOBAL_PORTFOLIO_DYNAMICS:
-            active_portfolio = GLOBAL_PORTFOLIO_DYNAMICS[target_device_id]
+            if not ticker_master_data:
+                return
+                
+            active_portfolio = {}
+            if target_device_id:
+                with data_lock:
+                    if target_device_id in GLOBAL_PORTFOLIO_DYNAMICS:
+                        active_portfolio = dict(GLOBAL_PORTFOLIO_DYNAMICS[target_device_id])
+                
+            tasks = [process_single_coin_pipeline(client, symbol, m_data, active_portfolio, semaphore) for symbol, m_data in ticker_master_data.items()]
+            results = await asyncio.gather(*tasks)
+            temp_data = [r for r in results if r is not None]
             
-        tasks = [process_single_coin_pipeline(client, symbol, m_data, active_portfolio, semaphore) for symbol, m_data in ticker_master_data.items()]
-        results = await asyncio.gather(*tasks)
-        temp_data = [r for r in results if r is not None]
-        
-        # PERBAIKAN: Untuk global cache loop, urutkan data secara modular aman
-        temp_data.sort(key=lambda x: (x['is_portfolio'], x['skor']), reverse=True)
-        MARKET_DATA_CACHE = temp_data
-        
-        LAST_SUCCESSFUL_SCAN_TIME = time.time()
-    except Exception as e:
-        print(f"Error during core scan execution: {e}")
+            temp_data.sort(key=lambda x: (x['is_portfolio'], x['skor']), reverse=True)
+            
+            with data_lock:
+                MARKET_DATA_CACHE = temp_data
+                LAST_SUCCESSFUL_SCAN_TIME = time.time()
+        except Exception as e:
+            print(f"Error during core scan execution: {e}")
 
 def run_loop_in_bg():
     while True:
@@ -372,6 +378,7 @@ def run_loop_in_bg():
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             loop.run_until_complete(execute_one_market_scan())
+            loop.close()
         except Exception as e:
             print(f"Background Loop Error: {e}")
         time.sleep(15)  
@@ -389,78 +396,76 @@ def index():
 
 @app.route('/api/data', methods=['POST'])
 def get_data():
-    global GLOBAL_PORTFOLIO_DYNAMICS
+    global GLOBAL_PORTFOLIO_DYNAMICS, MARKET_DATA_CACHE
     
     current_time = time.time()
-    is_cache_stale = (current_time - LAST_SUCCESSFUL_SCAN_TIME) > CACHE_TTL_SECONDS
+    with data_lock:
+        is_cache_stale = (current_time - LAST_SUCCESSFUL_SCAN_TIME) > CACHE_TTL_SECONDS
     
     req = request.json or {}
-    
-    # PERBAIKAN: Ambil Device ID unik dari payload kiriman JavaScript frontend
     device_id = req.get("device_id", "default_guest_device")
     
-    # PERBAIKAN: Amankan sinkronisasi portofolio terbatas hanya untuk KEY milik device tersebut
-    try:
-        GLOBAL_PORTFOLIO_DYNAMICS[device_id] = req.get("portfolio", {})
-    except Exception as e:
-        print(f"Failed to synchronize device dynamic cache: {e}")
+    with data_lock:
+        try:
+            GLOBAL_PORTFOLIO_DYNAMICS[device_id] = req.get("portfolio", {})
+        except Exception as e:
+            print(f"Failed to synchronize device dynamic cache: {e}")
     
-    # Jalankan scan instan dengan membawa parameter isolasi device_id jika cache kedaluwarsa
     if not MARKET_DATA_CACHE or is_cache_stale:
         try:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             loop.run_until_complete(execute_one_market_scan(target_device_id=device_id))
+            loop.close()
         except Exception as e:
             print(f"Instant fallback scan failed: {e}")
-    else:
-        # PERBAIKAN TIMESTAMPS OVERRIDE: 
-        # Jika menggunakan cache global yang sudah ada, set bendera is_portfolio secara dinamis 
-        # sesuai dengan data perangkat (device_id) yang sedang melakukan request saat ini.
-        active_portfolio = GLOBAL_PORTFOLIO_DYNAMICS.get(device_id, {})
-        for item in MARKET_DATA_CACHE:
-            coin = item["koin"]
-            if coin in active_portfolio:
-                item["is_portfolio"] = True
-                coin_p_data = active_portfolio[coin]
-                item["amount"] = coin_p_data.get("amount", 0.0)
-                item["entry"] = coin_p_data.get("costPrice", 0.0)
+            
+    with data_lock:
+        active_portfolio = dict(GLOBAL_PORTFOLIO_DYNAMICS.get(device_id, {}))
+        local_cache_copy = list(MARKET_DATA_CACHE)
+        current_btc_status = dict(GLOBAL_BTC_STATUS)
+
+    for item in local_cache_copy:
+        coin = item["koin"]
+        if coin in active_portfolio:
+            item["is_portfolio"] = True
+            coin_p_data = active_portfolio[coin]
+            item["amount"] = coin_p_data.get("amount", 0.0)
+            item["entry"] = coin_p_data.get("costPrice", 0.0)
+            
+            if item["entry"] > 0 and item["amount"] > 0:
+                item["tp"] = item["entry"] + (2 * item["atr"])
+                item["cl"] = item["entry"] - (1.5 * item["atr"])
+                item["current_value"] = item["amount"] * item["harga"]
+                initial_val = item["amount"] * item["entry"]
+                item["pnl_val"] = item["current_value"] - initial_val
+                item["pnl_pct"] = (item["pnl_val"] / initial_val) * 100
                 
-                # Hitung ulang kalkulasi spesifik PNL & kemajuan TP target
-                if item["entry"] > 0 and item["amount"] > 0:
-                    item["tp"] = item["entry"] + (2 * item["atr"])
-                    item["cl"] = item["entry"] - (1.5 * item["atr"])
-                    item["current_value"] = item["amount"] * item["harga"]
-                    initial_val = item["amount"] * item["entry"]
-                    item["pnl_val"] = item["current_value"] - initial_val
-                    item["pnl_pct"] = (item["pnl_val"] / initial_val) * 100
+                if item["harga"] >= item["tp"]: item["status_aksi"] = "TAKE PROFIT"
+                elif item["harga"] <= item["cl"]: item["status_aksi"] = "CUT LOSS"
+                else: item["status_aksi"] = "HOLDING"
+        else:
+            item["is_portfolio"] = False
+            item["amount"] = 0.0
+            item["entry"] = 0.0
+            item["tp"] = 0.0
+            item["cl"] = 0.0
+            item["pnl_val"] = 0.0
+            item["pnl_pct"] = 0.0
+            item["current_value"] = 0.0
+            if "ENGINE LOCKED" not in item["fase"]:
+                if item["fase"] in ["INSTITUTIONAL BUY", "VALID BREAKOUT", "EARLY RALLY", "EARLY RALLY (WEAK VOL)"]:
+                    item["status_aksi"] = "BUY STAGE"
+                elif item["fase"] == "OVERBOUGHT PEAK":
+                    item["status_aksi"] = "TAKE PROFIT"
+                else:
+                    item["status_aksi"] = "WAIT & SEE"
                     
-                    if item["harga"] >= item["tp"]: item["status_aksi"] = "TAKE PROFIT"
-                    elif item["harga"] <= item["cl"]: item["status_aksi"] = "CUT LOSS"
-                    else: item["status_aksi"] = "WAIT & SEE"
-            else:
-                item["is_portfolio"] = False
-                item["amount"] = 0.0
-                item["entry"] = 0.0
-                item["tp"] = 0.0
-                item["cl"] = 0.0
-                item["pnl_val"] = 0.0
-                item["pnl_pct"] = 0.0
-                item["current_value"] = 0.0
-                if "ENGINE LOCKED" not in item["fase"]:
-                    if item["fase"] in ["INSTITUTIONAL BUY", "VALID BREAKOUT", "EARLY RALLY", "EARLY RALLY (WEAK VOL)"]:
-                        item["status_aksi"] = "BUY STAGE"
-                    elif item["fase"] == "OVERBOUGHT PEAK":
-                        item["status_aksi"] = "TAKE PROFIT"
-                    else:
-                        item["status_aksi"] = "WAIT & SEE"
-                        
-        # Susun ulang prioritas agar baris portofolio milik device ini naik ke posisi paling atas tabel
-        MARKET_DATA_CACHE.sort(key=lambda x: (x['is_portfolio'], x['skor']), reverse=True)
-        
+    local_cache_copy.sort(key=lambda x: (x['is_portfolio'], x['skor']), reverse=True)
+    
     return jsonify({
-        "btc_status": GLOBAL_BTC_STATUS,
-        "market": MARKET_DATA_CACHE
+        "btc_status": current_btc_status,
+        "market": local_cache_copy
     })
 
 @app.route('/api/telegram/send_manual', methods=['POST'])
