@@ -57,7 +57,7 @@ async def check_bitcoin_circuit_breaker(client):
             btc_ma24 = sum(closes[-24:]) / 24
             btc_open_1h = float(klines[-1][1])
             btc_change_1h = ((live_btc - btc_open_1h) / btc_open_1h) * 100
-            
+
             if btc_change_1h <= -1.5:
                 GLOBAL_BTC_STATUS = {"is_safe": False, "reason": f"BTC DUMP ({btc_change_1h:.1f}%)"}
             elif live_btc < btc_ma24:
@@ -76,36 +76,36 @@ async def get_combined_tickers_data_async(client):
             all_tickers = response.json()
             ticker_dict = {}
             filtered_list = []
-            
+
             for t in all_tickers:
                 symbol = t['symbol']
                 if symbol.endswith('USDT') and (symbol not in COIN_BLACKLIST):
                     live_p = float(t['lastPrice'])
                     LIVE_PRICE_MAP[symbol] = live_p
-                    
+
                     filtered_list.append({
                         "symbol": symbol,
                         "pure_vol_24h": float(t['quoteVolume']),
                         "price_change_pct_24h": float(t['priceChangePercent'])
                     })
-            
+
             filtered_list.sort(key=lambda x: x['pure_vol_24h'], reverse=True)
             top_50_symbols = [item['symbol'] for item in filtered_list[:50]]
-            
+
             portfolio_symbols = []
             for dev_id, proto_data in GLOBAL_PORTFOLIO_DYNAMICS.items():
                 if isinstance(proto_data, dict):
                     portfolio_symbols.extend([f"{coin}USDT" for coin in proto_data.keys()])
-                
+
             target_symbols = list(set(top_50_symbols + portfolio_symbols))
-            
+
             for item in filtered_list:
                 if item['symbol'] in target_symbols:
                     ticker_dict[item['symbol']] = {
                         "pure_vol_24h": item['pure_vol_24h'],
                         "price_change_pct_24h": item['price_change_pct_24h']
                     }
-            
+
             for sym in target_symbols:
                 if sym not in LIVE_PRICE_MAP:
                     LIVE_PRICE_MAP[sym] = 0.0
@@ -132,7 +132,7 @@ def calculate_ma(prices, period):
 def calculate_macd_efficient(prices):
     if len(prices) < 35: 
         return 0.0, 0.0, 0.0
-    
+
     def get_ema_list(data, period):
         alpha = 2 / (period + 1)
         ema_res = []
@@ -145,18 +145,18 @@ def calculate_macd_efficient(prices):
 
     ema12_list = get_ema_list(prices, 12)
     ema26_list = get_ema_list(prices, 26)
-    
+
     offset = len(ema12_list) - len(ema26_list)
     macd_line = [e12 - e26 for e12, e26 in zip(ema12_list[offset:], ema26_list)]
-    
+
     if len(macd_line) < 9:
         return 0.0, 0.0, 0.0
-        
+
     signal_alpha = 2 / (9 + 1)
     current_signal = sum(macd_line[:9]) / 9
     for m_val in macd_line[9:]:
         current_signal = (m_val * signal_alpha) + (current_signal * (1 - signal_alpha))
-        
+
     current_macd = macd_line[-1]
     return current_macd, current_signal, current_macd - current_signal
 
@@ -165,7 +165,7 @@ def extract_market_structure_and_vol_ma(klines_1h):
     vol_ma20 = sum(volumes[-21:-1]) / 20 if len(volumes) >= 21 else 1.0
     highs_48h = [float(k[2]) for k in klines_1h[-49:-1]]
     local_swing_high = max(highs_48h) if highs_48h else 0.0
-    
+
     obv_proxy = 0
     for i in range(-5, -1):
         try:
@@ -214,7 +214,7 @@ def hitung_matriks_atr_dinamis(live_price, entry_price, atr, vol_spike_ratio, wh
     if entry_price > 0:
         tp_level = entry_price + (base_tp_multiplier * atr)
         cl_level = entry_price - (base_cl_multiplier * atr)
-        
+
         if highest_peak > entry_price:
             trailing_stop_floor = highest_peak - (1.2 * atr)
             if trailing_stop_floor > cl_level:
@@ -231,32 +231,32 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
         task_1w = fetch_klines_safely_async(client, symbol, '1w', 4)   
         task_1d = fetch_klines_safely_async(client, symbol, '1d', 105)  
         task_1h = fetch_klines_safely_async(client, symbol, '1h', 60)  
-        
+
         klines_1w, klines_1d, klines_1h = await asyncio.gather(task_1w, task_1d, task_1h)
         if not klines_1w or not klines_1d or not klines_1h or len(klines_1h) < 40 or len(klines_1d) < 99: return None
-            
+
         try:
             coin_name = symbol.replace("USDT", "")
             w1_close, w2_close = float(klines_1w[-2][4]), float(klines_1w[-3][4])
             is_macro_bullish = w1_close >= w2_close  
-            
+
             live_price = LIVE_PRICE_MAP.get(symbol, float(klines_1h[-1][4]))
             open_price = float(klines_1h[-1][1])
             price_pct_1h = ((live_price - open_price) / open_price) * 100
             atr, spread_ratio = calculate_atr_and_spread(klines_1d, klines_1h)
-            
+
             vol_ma20, local_swing_high, obv_proxy = extract_market_structure_and_vol_ma(klines_1h)
             daily_closes = [float(k[4]) for k in klines_1d]
             hourly_closes = [float(k[4]) for k in klines_1h]
             ma25_daily, ma99_daily = calculate_ma(daily_closes, 25), calculate_ma(daily_closes, 99)
-            
+
             macd_line, signal_line, macd_hist = calculate_macd_efficient(hourly_closes)
             is_ma_trend_bullish = live_price > ma25_daily and live_price > ma99_daily
             is_macd_momentum_bullish = macd_hist > 0
-            
+
             live_volume = float(klines_1h[-1][7])
             vol_spike_ratio = live_volume / vol_ma20 if vol_ma20 > 0 else 0
-            
+
             market_liquidity_pool = m_data.get("pure_vol_24h", 0)
             if market_liquidity_pool >= 50000000: required_vol_spike = 1.5
             elif market_liquidity_pool <= 5000000: required_vol_spike = 3.5
@@ -276,7 +276,7 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
             if spread_ratio < 0.9: base_whale += 10.0
             if is_whale_churning: base_whale -= 25.0  
             whale_dominance = round(max(10.0, min(99.0, base_whale)), 1)
-            
+
             fase = "CONSOLIDATION"
             momentum_score = (vol_spike_ratio * 35) + (whale_dominance * 0.5) + (price_pct_1h * 15)
             is_overextended = (live_price > ma25_daily + (2.5 * atr)) and atr > 0
@@ -307,7 +307,7 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
                     status_rencana_otomatis = "WAIT & SEE"
 
             harga_terformat = f"${live_price:.8f}" if live_price < 1.0 else f"${live_price:.4f}"
-            
+
             if coin_name not in LAST_ALERTS_STATE or LAST_ALERTS_STATE[coin_name] != fase:
                 if fase in ["VALID BREAKOUT", "INSTITUTIONAL BUY"] and GLOBAL_BTC_STATUS["is_safe"] and vol_spike_ratio >= 2.5:
                     emoji = "👑 BRAND NEW MSB!" if fase == "INSTITUTIONAL BUY" else "🔥 BREAKOUT SPIKE"
@@ -327,7 +327,7 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
             if entry_price > 0 and amount > 0:
                 if device_id not in GLOBAL_TRAILING_PEAKS:
                     GLOBAL_TRAILING_PEAKS[device_id] = {}
-                
+
                 old_peak = GLOBAL_TRAILING_PEAKS[device_id].get(coin_name, entry_price)
                 current_peak = max(old_peak, live_price)
                 GLOBAL_TRAILING_PEAKS[device_id][coin_name] = current_peak
@@ -379,10 +379,10 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
             print(f"Error processing {symbol}: {e}")
             return None
 
-async def execute_one_market_scan(target_device_id=None):
+# PERBAIKAN: Menambahkan parameter minimal_bootstrap untuk eksekusi kilat anti-timeout
+async def execute_one_market_scan(target_device_id=None, minimal_bootstrap=False):
     global MARKET_DATA_CACHE, LAST_SUCCESSFUL_SCAN_TIME
-    
-    # PERBAIKAN SINTAKSIS & EVENT LOOP: Buat client lokal segar tanpa kata kunci 'async' di depan nama variabel
+
     async with httpx.AsyncClient(
         limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
         timeout=httpx.Timeout(5.0)
@@ -391,23 +391,36 @@ async def execute_one_market_scan(target_device_id=None):
             semaphore = asyncio.Semaphore(4)  
             await check_bitcoin_circuit_breaker(brass_client)
             ticker_master_data = await get_combined_tickers_data_async(brass_client)
-            
+
             if not ticker_master_data:
                 return
-                
+
+            # OPTIMASI ANTI-TIMEOUT: Jika dijalankan saat cold-start, ambil 4 koin teratas saja untuk respons kilat
+            if minimal_bootstrap:
+                items_to_process = list(ticker_master_data.items())[:4]
+                ticker_master_data = dict(items_to_process)
+
             active_portfolio = {}
             dev_id_key = target_device_id if target_device_id else "default_guest_device"
             if target_device_id and target_device_id in GLOBAL_PORTFOLIO_DYNAMICS:
                 active_portfolio = GLOBAL_PORTFOLIO_DYNAMICS[target_device_id]
-                
+
             tasks = [process_single_coin_pipeline(brass_client, symbol, m_data, active_portfolio, semaphore, dev_id_key) for symbol, m_data in ticker_master_data.items()]
             results = await asyncio.gather(*tasks)
             temp_data = [r for r in results if r is not None]
-            
+
             temp_data.sort(key=lambda x: (x['is_portfolio'], x['skor']), reverse=True)
-            MARKET_DATA_CACHE = temp_data
             
+            # Gabungkan dengan data lama jika ini merupakan pengisian instan darurat
+            if minimal_bootstrap and MARKET_DATA_CACHE:
+                existing_coins = {x['koin'] for x in temp_data}
+                for old_item in MARKET_DATA_CACHE:
+                    if old_item['koin'] not in existing_coins:
+                        temp_data.append(old_item)
+
+            MARKET_DATA_CACHE = temp_data
             LAST_SUCCESSFUL_SCAN_TIME = time.time()
+            print(f"Scan completed successfully. Coins in cache: {len(MARKET_DATA_CACHE)}")
         except Exception as e:
             print(f"Error during core scan execution: {e}")
 
@@ -431,14 +444,14 @@ def trigger_engine_startup():
 @app.route('/')
 def index(): 
     return render_template('index.html')
+
 @app.route('/api/data', methods=['POST'])
 def get_data():
-    # PERBAIKAN: Menambahkan MARKET_DATA_CACHE ke deklarasi global agar bisa dibaca & diurutkan
     global GLOBAL_PORTFOLIO_DYNAMICS, GLOBAL_TRAILING_PEAKS, MARKET_DATA_CACHE
-    
+
     req = request.json or {}
     device_id = req.get("device_id", "default_guest_device")
-    
+
     try:
         GLOBAL_PORTFOLIO_DYNAMICS[device_id] = req.get("portfolio", {})
         if device_id in GLOBAL_TRAILING_PEAKS:
@@ -446,20 +459,19 @@ def get_data():
             GLOBAL_TRAILING_PEAKS[device_id] = {k: v for k, v in GLOBAL_TRAILING_PEAKS[device_id].items() if k in active_coins}
     except Exception as e:
         print(f"Failed to synchronize device dynamic cache: {e}")
-            
-    # ==================== FITUR ANTI-MACET (COLD-START FAIL-SAFE) ====================
-    # Jika background thread belum selesai mengunduh data saat user membuka web pertama kali,
-    # paksa aplikasi untuk melakukan pemindaian instan sekali saja agar tabel tidak kosong.
+
+    # ==================== INTEGRASI STRATEGI ANTI-MACET (FAST BOOTSTRAP) ====================
+    # Jika background thread belum siap, paksa scan kilat khusus 4 koin agar selesai < 3 detik
     if not MARKET_DATA_CACHE:
-        print("Initial cache is empty! Executing forced cold-start scan...")
+        print("Initial cache is empty! Executing ultra-fast minimal bootstrap...")
         try:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            loop.run_until_complete(execute_one_market_scan(target_device_id=device_id))
+            loop.run_until_complete(execute_one_market_scan(target_device_id=device_id, minimal_bootstrap=True))
         except Exception as e:
-            print(f"Forced cold-start scan failed: {e}")
-    # =================================================================================
-            
+            print(f"Fast bootstrap failed: {e}")
+    # ========================================================================================
+
     active_portfolio = GLOBAL_PORTFOLIO_DYNAMICS.get(device_id, {})
     for item in MARKET_DATA_CACHE:
         coin = item["koin"]
@@ -468,7 +480,7 @@ def get_data():
             coin_p_data = active_portfolio[coin]
             item["amount"] = coin_p_data.get("amount", 0.0)
             item["entry"] = coin_p_data.get("costPrice", 0.0)
-            
+
             current_peak = 0.0
             if item["entry"] > 0 and item["amount"] > 0:
                 if device_id not in GLOBAL_TRAILING_PEAKS:
@@ -493,7 +505,7 @@ def get_data():
                 initial_val = item["amount"] * item["entry"]
                 item["pnl_val"] = item["current_value"] - initial_val
                 item["pnl_pct"] = (item["pnl_val"] / initial_val) * 100
-                
+
                 if item["harga"] >= item["tp"]: item["status_aksi"] = "TAKE PROFIT"
                 elif item["harga"] <= item["cl"]: item["status_aksi"] = "CUT LOSS"
                 else: item["status_aksi"] = "HOLDING"
@@ -501,7 +513,7 @@ def get_data():
             item["is_portfolio"] = False
             item["amount"] = 0.0
             item["entry"] = 0.0
-            
+
             dtp, dcl = hitung_matriks_atr_dinamis(
                 live_price=item["harga"],
                 entry_price=0.0,
@@ -522,9 +534,9 @@ def get_data():
                     item["status_aksi"] = "TAKE PROFIT"
                 else:
                     item["status_aksi"] = "WAIT & SEE"
-                    
+
     MARKET_DATA_CACHE.sort(key=lambda x: (x['is_portfolio'], x['skor']), reverse=True)
-        
+
     return jsonify({
         "btc_status": GLOBAL_BTC_STATUS,
         "market": MARKET_DATA_CACHE
@@ -544,7 +556,7 @@ def send_manual_alert():
 
         harga_fmt = f"${harga:.8f}" if harga < 1.0 else f"${harga:.4f}"
         saran_fmt = f"${saran:.8f}" if saran < 1.0 else f"${saran:.4f}"
-        
+
         msg = (
             f"📢 *MANUAL QUANTUM SIGNAL ALERT*\n\n"
             f"Coin: *{coin}*\n"
@@ -555,7 +567,7 @@ def send_manual_alert():
             f"Action Strategy: *{status_aksi}*\n"
             f"Suggested Entry Trigger: `*{saran_fmt}*`"
         )
-        
+
         success = send_telegram_alert_sync(msg)
         if success:
             return jsonify({"status": "success", "message": "Signal broadcasted!"})
@@ -564,4 +576,4 @@ def send_manual_alert():
         return jsonify({"status": "error", "message": str(e)}), 400
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=False)
+    app.run(host='0.0.0.0', port=5000, debug=
