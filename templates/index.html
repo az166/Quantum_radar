@@ -110,7 +110,6 @@
     <script>
         let currentTargetCoin = "";
         let globalCachedData = [];
-        let webSocketInstance = null;
 
         function getOrCreateDeviceID() {
             let id = localStorage.getItem('quantum_device_id');
@@ -153,12 +152,12 @@
         function saveModalDataToCache() {
             const coin = document.getElementById('modal-coin-title').innerText;
             const portfolio = getLocalPortfolio();
-
+            
             portfolio[coin] = {
                 amount: parseFloat(document.getElementById('input-amount').value) || 0,
                 costPrice: parseFloat(document.getElementById('input-entry').value) || 0
             };
-
+            
             saveLocalPortfolio(portfolio);
             closeModal();
             updateDashboardData();
@@ -181,7 +180,7 @@
         function deleteAssetFromCache() {
             const coin = document.getElementById('modal-coin-title').innerText;
             const portfolio = getLocalPortfolio();
-
+            
             if (portfolio[coin] !== undefined) {
                 delete portfolio[coin];
                 saveLocalPortfolio(portfolio);
@@ -204,12 +203,12 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(coinData)
                 });
-
+                
                 if (response.ok) {
                     btn.className = "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 px-2.5 py-1 rounded text-xs font-bold";
                     btn.innerHTML = "✓ Sent";
                     setTimeout(() => {
-                        btn.className = "bg-amber-600/10 text-amber-400 hover:bg-amber-600/30 border border-amber-500/20 px-2.5 py-1 rounded text-xs font-bold transition flex items-center gap-1 mx-auto";
+                        btn.className = "bg-amber-600/10 text-amber-400 hover:bg-amber-600/30 border border-amber-500/20 px-2.5 py-1 rounded text-xs font-bold transition flex items-center justify-center gap-1 mx-auto";
                         btn.innerHTML = originalHtml;
                         btn.disabled = false;
                     }, 3000);
@@ -227,76 +226,10 @@
 
         function handleSearchFilter() { renderTableRows(globalCachedData); }
 
-        // PERBAIKAN RADIKAL: Browser mengambil status proteksi BTC langsung tanpa membebani event loop Python
-        async function fetchBtcStatusDirectly() {
-            try {
-                const res = await fetch("https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT");
-                if (res.ok) {
-                    const data = await res.json();
-                    const pct = parseFloat(data.priceChangePercent || 0);
-                    const btcBadge = document.getElementById('btc-badge');
-                    if (pct < -5.0) {
-                        btcBadge.className = "text-xs font-mono px-3 py-1.5 rounded-xl border border-rose-900/40 bg-rose-950/20 text-rose-400 animate-pulse";
-                        btcBadge.innerText = `⚠️ BTC DUMPING (${pct.toFixed(2)}%)`;
-                    } else {
-                        btcBadge.className = "text-xs font-mono px-3 py-1.5 rounded-xl border border-emerald-900/40 bg-emerald-950/20 text-emerald-400";
-                        btcBadge.innerText = `● BTC STABLE (${pct.toFixed(2)}%)`;
-                    }
-                }
-            } catch (e) {
-                console.error("Direct BTC log error:", e);
-            }
-        }
-
-        function connectPriceWebSocket(coinSymbols) {
-            if (webSocketInstance) {
-                webSocketInstance.close();
-            }
-
-            if (!coinSymbols || coinSymbols.length === 0) return;
-
-            const streams = coinSymbols.map(sym => `${sym.toLowerCase()}usdt@ticker`).join('/');
-            const wsUrl = `wss://stream.binance.com:9443/ws/${streams}`;
-
-            webSocketInstance = new WebSocket(wsUrl);
-
-            webSocketInstance.onmessage = (event) => {
-                const data = JSON.parse(event.data);
-                const rawSymbol = data.s; 
-                const currentPrice = parseFloat(data.c); 
-                const priceChangePercent = parseFloat(data.P);
-
-                const cleanCoinName = rawSymbol.replace("USDT", "");
-                const coinObj = globalCachedData.find(item => item.koin === cleanCoinName);
-
-                if (coinObj) {
-                    coinObj.harga = currentPrice;
-                    coinObj.persen_harga = priceChangePercent;
-                    
-                    if (coinObj.is_portfolio && coinObj.entry > 0 && coinObj.amount > 0) {
-                        coinObj.current_value = coinObj.amount * currentPrice;
-                        const initialVal = coinObj.amount * coinObj.entry;
-                        coinObj.pnl_val = coinObj.current_value - initialVal;
-                        coinObj.pnl_pct = (coinObj.pnl_val / initialVal) * 100;
-
-                        if (currentPrice >= coinObj.tp) coinObj.status_aksi = "TAKE PROFIT";
-                        else if (currentPrice <= coinObj.cl) coinObj.status_aksi = "CUT LOSS";
-                        else coinObj.status_aksi = coinObj.pnl_val >= 0 ? "HOLDING (PROFIT)" : "HOLD (DRAWDOWN)";
-                    }
-                    
-                    renderTableRows(globalCachedData);
-                }
-            };
-
-            webSocketInstance.onerror = (err) => {
-                console.error("WebSocket Price Stream Error:", err);
-            };
-        }
-
         function renderTableRows(coins) {
             const tbody = document.getElementById('market-rows');
             const searchQuery = document.getElementById('search-input').value.trim().toUpperCase();
-
+            
             if (!coins || !Array.isArray(coins) || coins.length === 0) {
                 tbody.innerHTML = `<tr><td colspan="7" class="p-8 text-center text-gray-500 font-mono animate-pulse">⏳ Waiting for Market Engine Data from Server...</td></tr>`;
                 return;
@@ -308,13 +241,12 @@
 
                 const priceChangeClass = coin.persen_harga >= 0 ? 'text-emerald-400' : 'text-rose-400';
                 const isPortfolioStyle = coin.is_portfolio ? 'bg-slate-900/60 border-l-4 border-cyan-500' : '';
-
+                
                 let statusBadgeClass = 'border-gray-800 text-gray-400';
                 if (coin.status_aksi === 'BUY STAGE') statusBadgeClass = 'border-emerald-500/30 text-emerald-400 bg-emerald-950/20';
-                if (coin.status_aksi.includes('TAKE PROFIT')) statusBadgeClass = 'border-amber-500/30 text-amber-400 bg-amber-950/20 font-bold animate-pulse';
-                if (coin.status_aksi.includes('CUT LOSS')) statusBadgeClass = 'border-rose-500/40 text-rose-400 bg-rose-950/20 font-bold';
-                if (coin.status_aksi.includes('HOLDING (PROFIT)')) statusBadgeClass = 'border-emerald-500/20 text-emerald-500/90 bg-emerald-950/10';
-                if (coin.status_aksi.includes('HOLD (DRAWDOWN)')) statusBadgeClass = 'border-slate-700 text-slate-400 bg-slate-900/20';
+                if (coin.status_aksi === 'TAKE PROFIT') statusBadgeClass = 'border-amber-500/30 text-amber-400 bg-amber-950/20';
+                if (coin.status_aksi === 'CUT LOSS') statusBadgeClass = 'border-rose-500/40 text-rose-400 bg-rose-950/20';
+                if (coin.status_aksi === 'HOLDING') statusBadgeClass = 'border-emerald-500/20 text-emerald-500/90 bg-emerald-950/10';
 
                 let faseLabel = coin.fase || "SCANNING";
                 let faseColorClass = 'text-cyan-400';
@@ -370,7 +302,7 @@
                     const isPullbackMode = coin.fase.includes("WEAK VOL");
                     const entryColor = isPullbackMode ? 'text-amber-400 border-amber-900 bg-amber-950/20' : 'text-cyan-400 border-cyan-900 bg-cyan-950/20';
                     const labelPrefix = isPullbackMode ? '🎯 DIP' : '🚀 ENTRY';
-
+                    
                     strategicBlock = `
                         <div class="text-gray-500 truncate">Cost: <span class="text-gray-600">-</span></div>
                         <div class="font-mono mt-1 text-xs px-2 py-1 border rounded block text-right ${entryColor} truncate">
@@ -402,14 +334,14 @@
                             <button onclick="sendTelegramManual(this, '${coin.koin}')" class="bg-amber-600/10 text-amber-400 hover:bg-amber-600/30 border border-amber-500/20 px-2 py-1 rounded text-xs font-bold transition flex items-center justify-center gap-1 w-full cursor-pointer truncate">✈️ Send</button>
                         </td>
                         <td class="p-4 text-center overflow-hidden">
-                            <span class="border px-2 py-1 rounded-md text-[11px] font-mono font-bold block w-full truncate ${statusBadgeClass}" title="${statusBadgeClass}">● ${coin.status_aksi}</span>
+                            <span class="border px-2 py-1 rounded-md text-[11px] font-mono font-bold block w-full truncate ${statusBadgeClass}">● ${coin.status_aksi}</span>
                         </td>
                         <td class="p-4 overflow-hidden">${performanceContent}</td>
                         <td class="p-4 font-mono text-right text-xs overflow-hidden">${strategicBlock}</td>
                     </tr>
                 `;
             });
-
+            
             tbody.innerHTML = rowsHtml || `<tr><td colspan="7" class="p-8 text-center text-gray-500 font-mono">Asset not found...</td></tr>`;
         }
 
@@ -420,9 +352,9 @@
                     currentLocalPortfolio = {};
                     saveLocalPortfolio(currentLocalPortfolio);
                 }
-
+                
                 const currentDeviceId = getOrCreateDeviceID();
-
+                
                 const response = await fetch('/api/data', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -431,40 +363,39 @@
                         portfolio: currentLocalPortfolio 
                     })
                 });
-
+                
                 if (!response.ok) {
                     document.getElementById('sync-status').innerText = 'SERVER ERROR (' + response.status + ')';
+                    setTimeout(updateDashboardData, 15000); // Jadwalkan ulang jika terjadi kegagalan server
                     return;
                 }
                 const rootData = await response.json();
+                
+                const btc = rootData.btc_status;
+                const btcBadge = document.getElementById('btc-badge');
+                if(btc && btc.is_safe) {
+                    btcBadge.className = "text-xs font-mono px-3 py-1.5 rounded-xl border border-emerald-900/40 bg-emerald-950/20 text-emerald-400";
+                    btcBadge.innerText = `● ${btc.reason}`;
+                } else if (btc) {
+                    btcBadge.className = "text-xs font-mono px-3 py-1.5 rounded-xl border border-rose-900/40 bg-rose-950/20 text-rose-400 animate-pulse";
+                    btcBadge.innerText = `⚠️ ${btc.reason}`;
+                }
 
                 globalCachedData = rootData.market || [];
                 renderTableRows(globalCachedData);
-
-                const uniqueCoins = globalCachedData.map(c => c.koin);
-                connectPriceWebSocket(uniqueCoins);
-
-                document.getElementById('sync-status').innerText = 'QUANTUM SECURE WEBSOCKET ACTIVE (1S)';
+                
+                document.getElementById('sync-status').innerText = 'QUANTUM SECURE BROWSER ENGINE LIVE';
             } catch (err) {
                 console.error(err);
                 document.getElementById('sync-status').innerText = 'CORE CONNECTION LOST (RETRYING)';
             }
+            
+            // PERBAIKAN REKURSIF: Menggantikan setInterval lama untuk mencegah penumpukan request
+            setTimeout(updateDashboardData, 15000);
         }
 
-        // PERBAIKAN STABILITAS: Loop rekursif aman dengan pembatasan interval longgar (30 detik)
-        async function executionEngineLoop() {
-            await updateDashboardData();
-            setTimeout(executionEngineLoop, 30000); 
-        }
-
-        async function btcProtectionLoop() {
-            await fetchBtcStatusDirectly();
-            setTimeout(btcProtectionLoop, 15000);
-        }
-
-        // Jalankan mesin pemantau mandiri
-        executionEngineLoop();
-        btcProtectionLoop();
+        // Jalankan sinkronisasi pertama kali saat halaman dimuat
+        updateDashboardData();
     </script>
 </body>
 </html>
