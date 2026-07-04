@@ -11,7 +11,7 @@ MARKET_DATA_CACHE = []
 LAST_ALERTS_STATE = {}
 ENGINE_INITIALIZED = False
 
-# Variabel optimasi untuk mendeteksi cache kedalwarsa (TTL)
+# Variabel optimasi untuk mendeteksi cache kedaluwarsa (TTL)
 LAST_SUCCESSFUL_SCAN_TIME = 0
 CACHE_TTL_SECONDS = 120  
 
@@ -382,36 +382,34 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
 async def execute_one_market_scan(target_device_id=None):
     global MARKET_DATA_CACHE, LAST_SUCCESSFUL_SCAN_TIME
     
-    # PERBAIKAN 1: Buat client baru khusus di dalam skope event loop saat ini demi keamanan konkurensi
-    async BrassClient = httpx.AsyncClient(
+    # PERBAIKAN SINTAKSIS & EVENT LOOP: Buat client lokal segar tanpa kata kunci 'async' di depan nama variabel
+    async with httpx.AsyncClient(
         limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
         timeout=httpx.Timeout(5.0)
-    )
-    try:
-        semaphore = asyncio.Semaphore(4)  
-        await check_bitcoin_circuit_breaker(BrassClient)
-        ticker_master_data = await get_combined_tickers_data_async(BrassClient)
-        
-        if not ticker_master_data:
-            return
+    ) as brass_client:
+        try:
+            semaphore = asyncio.Semaphore(4)  
+            await check_bitcoin_circuit_breaker(brass_client)
+            ticker_master_data = await get_combined_tickers_data_async(brass_client)
             
-        active_portfolio = {}
-        dev_id_key = target_device_id if target_device_id else "default_guest_device"
-        if target_device_id and target_device_id in GLOBAL_PORTFOLIO_DYNAMICS:
-            active_portfolio = GLOBAL_PORTFOLIO_DYNAMICS[target_device_id]
+            if not ticker_master_data:
+                return
+                
+            active_portfolio = {}
+            dev_id_key = target_device_id if target_device_id else "default_guest_device"
+            if target_device_id and target_device_id in GLOBAL_PORTFOLIO_DYNAMICS:
+                active_portfolio = GLOBAL_PORTFOLIO_DYNAMICS[target_device_id]
+                
+            tasks = [process_single_coin_pipeline(brass_client, symbol, m_data, active_portfolio, semaphore, dev_id_key) for symbol, m_data in ticker_master_data.items()]
+            results = await asyncio.gather(*tasks)
+            temp_data = [r for r in results if r is not None]
             
-        tasks = [process_single_coin_pipeline(BrassClient, symbol, m_data, active_portfolio, semaphore, dev_id_key) for symbol, m_data in ticker_master_data.items()]
-        results = await asyncio.gather(*tasks)
-        temp_data = [r for r in results if r is not None]
-        
-        temp_data.sort(key=lambda x: (x['is_portfolio'], x['skor']), reverse=True)
-        MARKET_DATA_CACHE = temp_data
-        
-        LAST_SUCCESSFUL_SCAN_TIME = time.time()
-    except Exception as e:
-        print(f"Error during core scan execution: {e}")
-    finally:
-        await BrassClient.aclose() # Pastikan koneksi ditutup rapi
+            temp_data.sort(key=lambda x: (x['is_portfolio'], x['skor']), reverse=True)
+            MARKET_DATA_CACHE = temp_data
+            
+            LAST_SUCCESSFUL_SCAN_TIME = time.time()
+        except Exception as e:
+            print(f"Error during core scan execution: {e}")
 
 def run_loop_in_bg():
     while True:
@@ -438,9 +436,6 @@ def index():
 def get_data():
     global GLOBAL_PORTFOLIO_DYNAMICS, GLOBAL_TRAILING_PEAKS
     
-    current_time = time.time()
-    is_cache_stale = (current_time - LAST_SUCCESSFUL_SCAN_TIME) > CACHE_TTL_SECONDS
-    
     req = request.json or {}
     device_id = req.get("device_id", "default_guest_device")
     
@@ -451,17 +446,8 @@ def get_data():
             GLOBAL_TRAILING_PEAKS[device_id] = {k: v for k, v in GLOBAL_TRAILING_PEAKS[device_id].items() if k in active_coins}
     except Exception as e:
         print(f"Failed to synchronize device dynamic cache: {e}")
-    
-    # PERBAIKAN 2: Jika data cache kosong atau kedaluwarsa, jalankan fallback sinkronisasi langsung di loop Flask saat ini
-    if not MARKET_DATA_CACHE or is_cache_stale:
-        try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(execute_one_market_scan(target_device_id=device_id))
-        except Exception as e:
-            print(f"Instant fallback scan failed: {e}")
             
-    # Lakukan kalkulasi data spesifik per peramban klien menggunakan cache memori utama
+    # PERBAIKAN STABILITAS: Ambil langsung hasil olahan dari latar belakang demi menghindari tabrakan loop gunicorn
     active_portfolio = GLOBAL_PORTFOLIO_DYNAMICS.get(device_id, {})
     for item in MARKET_DATA_CACHE:
         coin = item["koin"]
