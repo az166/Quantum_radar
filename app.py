@@ -29,13 +29,13 @@ GLOBAL_BTC_STATUS = {"is_safe": True, "reason": "Connecting"}
 # Struktur data multi-device: { "device_id_1": {"SOL": {...}}, "device_id_2": {"BTC": {...}} }
 GLOBAL_PORTFOLIO_DYNAMICS = {} 
 
-# Lock thread-safe untuk mengamankan manipulasi data global antar thread Flask
+# Lock thread-safe untuk mengamankan data global antar thread
 data_lock = Lock()
 
 def send_telegram_alert_sync(message):
     if not TELEGRAM_TOKEN or "ENTER_TOKEN" in TELEGRAM_TOKEN:
         return False
-    url = f"https://api.telegram.com/bot{TELEGRAM_TOKEN}/sendMessage"
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
     try:
         with httpx.Client() as client:
@@ -341,13 +341,12 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
 async def execute_one_market_scan(target_device_id=None):
     global MARKET_DATA_CACHE, LAST_SUCCESSFUL_SCAN_TIME
     
-    # PERBAIKAN: Client baru dibuat lokal per siklus agar tidak bentrok antar event loop
     async with httpx.AsyncClient(
         limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
-        timeout=httpx.Timeout(5.0)
+        timeout=httpx.Timeout(6.0)
     ) as client:
         try:
-            semaphore = asyncio.Semaphore(4)  
+            semaphore = asyncio.max_connections if hasattr(asyncio, 'max_connections') else asyncio.Semaphore(5)
             await check_bitcoin_circuit_breaker(client)
             ticker_master_data = await get_combined_tickers_data_async(client)
             
@@ -373,7 +372,18 @@ async def execute_one_market_scan(target_device_id=None):
             print(f"Error during core scan execution: {e}")
 
 def run_loop_in_bg():
+    # PERBAIKAN: Jalankan scan pertama secara instan sebelum masuk loop interval
+    try:
+        init_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(init_loop)
+        init_loop.run_until_complete(execute_one_market_scan())
+        init_loop.close()
+        print("Initial engine scan successfully completed.")
+    except Exception as e:
+        print(f"Initial Background Scan Failed: {e}")
+
     while True:
+        time.sleep(15)  
         try:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
@@ -381,7 +391,6 @@ def run_loop_in_bg():
             loop.close()
         except Exception as e:
             print(f"Background Loop Error: {e}")
-        time.sleep(15)  
 
 @app.before_request
 def trigger_engine_startup():
@@ -411,19 +420,30 @@ def get_data():
         except Exception as e:
             print(f"Failed to synchronize device dynamic cache: {e}")
     
+    # Jika cache kosong atau usang, gunakan data lama yang ada dulu (non-blocking) daripada macet total
     if not MARKET_DATA_CACHE or is_cache_stale:
-        try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(execute_one_market_scan(target_device_id=device_id))
-            loop.close()
-        except Exception as e:
-            print(f"Instant fallback scan failed: {e}")
+        # Jalankan fallback di thread terpisah agar router Flask langsung merespon tanpa lambat
+        def force_fallback():
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(execute_one_market_scan(target_device_id=device_id))
+                loop.close()
+            except Exception as ex:
+                print(f"Async fallback runtime failed: {ex}")
+        Thread(target=force_fallback).start()
             
     with data_lock:
         active_portfolio = dict(GLOBAL_PORTFOLIO_DYNAMICS.get(device_id, {}))
         local_cache_copy = list(MARKET_DATA_CACHE)
         current_btc_status = dict(GLOBAL_BTC_STATUS)
+
+    # Kirim data dummy/kosong terformat jika server benar-benar baru menyala
+    if not local_cache_copy:
+        return jsonify({
+            "btc_status": current_btc_status,
+            "market": []
+        })
 
     for item in local_cache_copy:
         coin = item["koin"]
