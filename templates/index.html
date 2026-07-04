@@ -231,7 +231,7 @@
             const searchQuery = document.getElementById('search-input').value.trim().toUpperCase();
             
             if (!coins || !Array.isArray(coins) || coins.length === 0) {
-                tbody.innerHTML = `<tr><td colspan="7" class="p-8 text-center text-gray-500 font-mono animate-pulse">⏳ Waiting for Market Engine Data from Server...</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="7" class="p-8 text-center text-gray-500 font-mono animate-pulse">⏳ Cold-starting engine. Compiling initial market scan from Binance API...</td></tr>`;
                 return;
             }
 
@@ -366,7 +366,7 @@
                 
                 if (!response.ok) {
                     document.getElementById('sync-status').innerText = 'SERVER ERROR (' + response.status + ')';
-                    setTimeout(updateDashboardData, 15000); // Jadwalkan ulang jika terjadi kegagalan server
+                    setTimeout(updateDashboardData, 15000); 
                     return;
                 }
                 const rootData = await response.json();
@@ -384,13 +384,16 @@
                 globalCachedData = rootData.market || [];
                 renderTableRows(globalCachedData);
                 
-                document.getElementById('sync-status').innerText = 'QUANTUM SECURE BROWSER ENGINE LIVE';
+                if (globalCachedData.length > 0) {
+                    document.getElementById('sync-status').innerText = 'QUANTUM SECURE BROWSER ENGINE LIVE';
+                } else {
+                    document.getElementById('sync-status').innerText = 'ENGINE INITIALIZING, RETRYING...';
+                }
             } catch (err) {
                 console.error(err);
                 document.getElementById('sync-status').innerText = 'CORE CONNECTION LOST (RETRYING)';
             }
             
-            // PERBAIKAN REKURSIF: Menggantikan setInterval lama untuk mencegah penumpukan request
             setTimeout(updateDashboardData, 15000);
         }
 
