@@ -58,7 +58,6 @@
 
         <main class="glass-panel rounded-xl overflow-hidden shadow-2xl border border-gray-900">
             <div class="overflow-x-auto w-full">
-                <!-- UKURAN TETAP TABEL (table-fixed) UNTUK MENCEGAH RE-LAYOUT OTOMATIS -->
                 <table class="w-full text-left border-collapse table-fixed min-w-[1000px]">
                     <thead>
                         <tr class="bg-gray-950/80 text-gray-400 text-xs font-bold uppercase tracking-wider border-b border-gray-800">
@@ -228,6 +227,27 @@
 
         function handleSearchFilter() { renderTableRows(globalCachedData); }
 
+        // PERBAIKAN RADIKAL: Browser mengambil status proteksi BTC langsung tanpa membebani event loop Python
+        async function fetchBtcStatusDirectly() {
+            try {
+                const res = await fetch("https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT");
+                if (res.ok) {
+                    const data = await res.json();
+                    const pct = parseFloat(data.priceChangePercent || 0);
+                    const btcBadge = document.getElementById('btc-badge');
+                    if (pct < -5.0) {
+                        btcBadge.className = "text-xs font-mono px-3 py-1.5 rounded-xl border border-rose-900/40 bg-rose-950/20 text-rose-400 animate-pulse";
+                        btcBadge.innerText = `⚠️ BTC DUMPING (${pct.toFixed(2)}%)`;
+                    } else {
+                        btcBadge.className = "text-xs font-mono px-3 py-1.5 rounded-xl border border-emerald-900/40 bg-emerald-950/20 text-emerald-400";
+                        btcBadge.innerText = `● BTC STABLE (${pct.toFixed(2)}%)`;
+                    }
+                }
+            } catch (e) {
+                console.error("Direct BTC log error:", e);
+            }
+        }
+
         function connectPriceWebSocket(coinSymbols) {
             if (webSocketInstance) {
                 webSocketInstance.close();
@@ -382,7 +402,7 @@
                             <button onclick="sendTelegramManual(this, '${coin.koin}')" class="bg-amber-600/10 text-amber-400 hover:bg-amber-600/30 border border-amber-500/20 px-2 py-1 rounded text-xs font-bold transition flex items-center justify-center gap-1 w-full cursor-pointer truncate">✈️ Send</button>
                         </td>
                         <td class="p-4 text-center overflow-hidden">
-                            <span class="border px-2 py-1 rounded-md text-[11px] font-mono font-bold block w-full truncate ${statusBadgeClass}" title="${coin.status_aksi}">● ${coin.status_aksi}</span>
+                            <span class="border px-2 py-1 rounded-md text-[11px] font-mono font-bold block w-full truncate ${statusBadgeClass}" title="${statusBadgeClass}">● ${coin.status_aksi}</span>
                         </td>
                         <td class="p-4 overflow-hidden">${performanceContent}</td>
                         <td class="p-4 font-mono text-right text-xs overflow-hidden">${strategicBlock}</td>
@@ -418,16 +438,6 @@
                 }
                 const rootData = await response.json();
 
-                const btc = rootData.btc_status;
-                const btcBadge = document.getElementById('btc-badge');
-                if(btc && btc.is_safe) {
-                    btcBadge.className = "text-xs font-mono px-3 py-1.5 rounded-xl border border-emerald-900/40 bg-emerald-950/20 text-emerald-400";
-                    btcBadge.innerText = `● ${btc.reason}`;
-                } else if (btc) {
-                    btcBadge.className = "text-xs font-mono px-3 py-1.5 rounded-xl border border-rose-900/40 bg-rose-950/20 text-rose-400 animate-pulse";
-                    btcBadge.innerText = `⚠️ ${btc.reason}`;
-                }
-
                 globalCachedData = rootData.market || [];
                 renderTableRows(globalCachedData);
 
@@ -441,9 +451,20 @@
             }
         }
 
-        // Sinkronisasi data struktural berat dari server diatur setiap 12 detik
-        setInterval(updateDashboardData, 12000);
-        updateDashboardData();
+        // PERBAIKAN STABILITAS: Loop rekursif aman dengan pembatasan interval longgar (30 detik)
+        async function executionEngineLoop() {
+            await updateDashboardData();
+            setTimeout(executionEngineLoop, 30000); 
+        }
+
+        async function btcProtectionLoop() {
+            await fetchBtcStatusDirectly();
+            setTimeout(btcProtectionLoop, 15000);
+        }
+
+        // Jalankan mesin pemantau mandiri
+        executionEngineLoop();
+        btcProtectionLoop();
     </script>
 </body>
 </html>
