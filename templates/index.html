@@ -58,16 +58,17 @@
 
         <main class="glass-panel rounded-xl overflow-hidden shadow-2xl border border-gray-900">
             <div class="overflow-x-auto w-full">
-                <table class="w-full text-left border-collapse">
+                <!-- UKURAN TETAP TABEL (table-fixed) UNTUK MENCEGAH RE-LAYOUT OTOMATIS -->
+                <table class="w-full text-left border-collapse table-fixed min-w-[1000px]">
                     <thead>
                         <tr class="bg-gray-950/80 text-gray-400 text-xs font-bold uppercase tracking-wider border-b border-gray-800">
-                            <th class="p-4">Coin / Structural Analysis</th>
-                            <th class="p-4">Live Price</th>
-                            <th class="p-4 text-center">Action</th>
-                            <th class="p-4 text-center">Telegram</th>
-                            <th class="p-4 text-center">Plan Status</th>
-                            <th class="p-4">Asset Performance & TP Progress</th>
-                            <th class="p-4 text-right">ATR Strategic Matrix</th>
+                            <th class="p-4 w-[22%]">Coin / Structural Analysis</th>
+                            <th class="p-4 w-[13%]">Live Price</th>
+                            <th class="p-4 text-center w-[10%]">Action</th>
+                            <th class="p-4 text-center w-[10%]">Telegram</th>
+                            <th class="p-4 text-center w-[15%]">Plan Status</th>
+                            <th class="p-4 w-[18%]">Asset Performance & TP Progress</th>
+                            <th class="p-4 text-right w-[12%]">ATR Strategic Matrix</th>
                         </tr>
                     </thead>
                     <tbody id="market-rows" class="divide-y divide-gray-900/60 text-sm font-medium">
@@ -316,76 +317,75 @@
                     const pnlColor = coin.pnl_val >= 0 ? 'text-emerald-400' : 'text-rose-400';
                     const pnlSign = coin.pnl_val >= 0 ? '+' : '';
                     performanceContent = `
-                        <div class="flex flex-col gap-1 w-44">
+                        <div class="flex flex-col gap-1 w-full max-w-[160px]">
                             <div class="flex items-center gap-2">
                                 <div class="w-full bg-gray-950 rounded-full h-1.5 overflow-hidden border border-gray-800">
                                     <div class="bg-gradient-to-r from-cyan-500 to-indigo-500 h-1.5 rounded-full" style="width: ${progressPct}%"></div>
                                 </div>
                                 <span class="text-xs font-mono font-bold text-cyan-400">${progressPct.toFixed(0)}%</span>
                             </div>
-                            <div class="text-xs font-mono flex justify-between">
-                                <span class="text-gray-400">Hold: $${(coin.current_value || 0).toFixed(2)}</span>
-                                <span class="${pnlColor} font-bold">${pnlSign}$${(coin.pnl_val || 0).toFixed(2)} (${pnlSign}${(coin.pnl_pct || 0).toFixed(1)}%)</span>
+                            <div class="text-xs font-mono flex justify-between gap-1 overflow-hidden">
+                                <span class="text-gray-400 truncate">Hold: $${(coin.current_value || 0).toFixed(2)}</span>
+                                <span class="${pnlColor} font-bold truncate">${pnlSign}${(coin.pnl_pct || 0).toFixed(1)}%</span>
                             </div>
                         </div>
                     `;
                 } else if (coin.is_portfolio && coin.entry === 0) {
-                    performanceContent = `<div class="text-xs font-mono text-cyan-500/80"><span class="bg-cyan-950/40 border border-cyan-900/60 px-2 py-1 rounded">🔮 BROWSER WATCHLIST ACTIVE</span></div>`;
+                    performanceContent = `<div class="text-xs font-mono text-cyan-500/80 truncate"><span class="bg-cyan-950/40 border border-cyan-900/60 px-2 py-1 rounded block truncate">🔮 WATCHLIST</span></div>`;
                 } else {
-                    performanceContent = `<div class="text-xs font-mono text-gray-500"><span class="bg-gray-950 border border-gray-800 px-2 py-1 rounded">SCANNER INCLUSION</span></div>`;
+                    performanceContent = `<div class="text-xs font-mono text-gray-500 truncate"><span class="bg-gray-950 border border-gray-800 px-2 py-1 rounded block truncate">SCANNER</span></div>`;
                 }
 
                 let strategicBlock = '';
                 if (coin.entry > 0) {
                     strategicBlock = `
-                        <div class="text-gray-400">Cost: <span class="text-gray-200">${formatQuantumPrice(coin.entry)}</span></div>
-                        <div class="text-emerald-400 font-bold mt-0.5">TP (2.0x): <span>${formatQuantumPrice(coin.tp)}</span></div>
-                        <div class="text-rose-400 font-bold mt-0.5">CL (1.5x): <span>${formatQuantumPrice(coin.cl)}</span></div>
-                        <div class="font-mono mt-1 text-xs px-2 py-0.5 border rounded block text-right border-cyan-500/40 text-cyan-400 bg-cyan-950/20">
-                            <span class="text-xs block opacity-60 font-sans">🎯 AVG DOWN TRIGGER</span>
+                        <div class="text-gray-400 truncate">Cost: <span class="text-gray-200">${formatQuantumPrice(coin.entry)}</span></div>
+                        <div class="text-emerald-400 font-bold mt-0.5 truncate">TP: <span>${formatQuantumPrice(coin.tp)}</span></div>
+                        <div class="text-rose-400 font-bold mt-0.5 truncate">CL: <span>${formatQuantumPrice(coin.cl)}</span></div>
+                        <div class="font-mono mt-1 text-xs px-2 py-0.5 border rounded block text-right border-cyan-500/40 text-cyan-400 bg-cyan-950/20 truncate">
                             ${formatQuantumPrice(coin.saran_entry)}
                         </div>
                     `;
                 } else {
                     const isPullbackMode = coin.fase.includes("WEAK VOL");
                     const entryColor = isPullbackMode ? 'text-amber-400 border-amber-900 bg-amber-950/20' : 'text-cyan-400 border-cyan-900 bg-cyan-950/20';
-                    const labelPrefix = isPullbackMode ? '🎯 LIMIT THE DIP' : '🚀 BREAKOUT ENTRY';
+                    const labelPrefix = isPullbackMode ? '🎯 DIP' : '🚀 ENTRY';
 
                     strategicBlock = `
-                        <div class="text-gray-500">Cost: <span class="text-gray-600">-</span></div>
-                        <div class="font-mono mt-1 text-xs px-2 py-1 border rounded block text-right ${entryColor}">
-                            <span class="text-xs block opacity-60 font-sans">${labelPrefix}</span>
+                        <div class="text-gray-500 truncate">Cost: <span class="text-gray-600">-</span></div>
+                        <div class="font-mono mt-1 text-xs px-2 py-1 border rounded block text-right ${entryColor} truncate">
+                            <span class="text-[10px] block opacity-60 font-sans">${labelPrefix}</span>
                             ${formatQuantumPrice(coin.saran_entry)}
                         </div>
                     `;
                 }
 
                 rowsHtml += `
-                    <tr class="${isPortfolioStyle} hover:bg-gray-900/40 transition border-b border-gray-900">
-                        <td class="p-4">
-                            <div class="flex items-center gap-2">
-                                <span class="text-xs">${coin.is_portfolio ? '⚡' : '🔍'}</span>
-                                <span class="font-black text-white text-base tracking-wide">${coin.koin}</span>
-                                <span class="text-xs bg-black/40 text-gray-400 px-1.5 py-0.5 rounded font-mono">Vol MA20: ${(coin.rasio || 0).toFixed(1)}x</span>
-                                <span class="text-xs bg-indigo-950/40 text-indigo-400 border border-indigo-900 px-1.5 py-0.5 rounded font-mono">Whale: ${coin.whale}%</span>
+                    <tr class="${isPortfolioStyle} hover:bg-gray-900/40 transition border-b border-gray-900 h-16">
+                        <td class="p-4 overflow-hidden">
+                            <div class="flex items-center gap-1.5 w-full">
+                                <span class="text-xs flex-shrink-0">${coin.is_portfolio ? '⚡' : '🔍'}</span>
+                                <span class="font-black text-white text-base tracking-wide truncate max-w-[70px]" title="${coin.koin}">${coin.koin}</span>
+                                <span class="text-[10px] bg-black/40 text-gray-400 px-1 rounded font-mono flex-shrink-0">V:${(coin.rasio || 0).toFixed(1)}x</span>
+                                <span class="text-[10px] bg-indigo-950/40 text-indigo-400 border border-indigo-900 px-1 rounded font-mono flex-shrink-0">W:${coin.whale}%</span>
                             </div>
-                            <div class="text-xs ${faseColorClass} mt-1 uppercase tracking-wider font-semibold">${faseLabel}</div>
+                            <div class="text-xs ${faseColorClass} mt-1 uppercase tracking-wider font-semibold truncate" title="${faseLabel}">${faseLabel}</div>
                         </td>
-                        <td class="p-4 font-mono">
-                            <div class="text-white font-bold">${formatQuantumPrice(coin.harga)}</div>
-                            <div class="text-xs ${priceChangeClass} font-bold mt-0.5">${coin.persen_harga >= 0 ? '+' : ''}${(coin.persen_harga || 0).toFixed(2)}%</div>
+                        <td class="p-4 font-mono overflow-hidden">
+                            <div class="text-white font-bold truncate">${formatQuantumPrice(coin.harga)}</div>
+                            <div class="text-xs ${priceChangeClass} font-bold mt-0.5 truncate">${coin.persen_harga >= 0 ? '+' : ''}${(coin.persen_harga || 0).toFixed(2)}%</div>
                         </td>
-                        <td class="p-4 text-center">
-                            <button onclick="openModal('${coin.koin}', ${coin.amount}, ${coin.entry})" class="bg-indigo-600/10 text-indigo-400 hover:bg-indigo-600/30 border border-indigo-500/20 px-2.5 py-1 rounded text-xs font-bold transition">Manage</button>
+                        <td class="p-4 text-center overflow-hidden">
+                            <button onclick="openModal('${coin.koin}', ${coin.amount}, ${coin.entry})" class="bg-indigo-600/10 text-indigo-400 hover:bg-indigo-600/30 border border-indigo-500/20 px-2 py-1 rounded text-xs font-bold transition cursor-pointer block w-full truncate">Manage</button>
                         </td>
-                        <td class="p-4 text-center">
-                            <button onclick="sendTelegramManual(this, '${coin.koin}')" class="bg-amber-600/10 text-amber-400 hover:bg-amber-600/30 border border-amber-500/20 px-2.5 py-1 rounded text-xs font-bold transition flex items-center gap-1 mx-auto">✈️ Send</button>
+                        <td class="p-4 text-center overflow-hidden">
+                            <button onclick="sendTelegramManual(this, '${coin.koin}')" class="bg-amber-600/10 text-amber-400 hover:bg-amber-600/30 border border-amber-500/20 px-2 py-1 rounded text-xs font-bold transition flex items-center justify-center gap-1 w-full cursor-pointer truncate">✈️ Send</button>
                         </td>
-                        <td class="p-4 text-center">
-                            <span class="border px-2.5 py-1 rounded-md text-xs font-mono font-bold inline-block ${statusBadgeClass}">● ${coin.status_aksi}</span>
+                        <td class="p-4 text-center overflow-hidden">
+                            <span class="border px-2 py-1 rounded-md text-[11px] font-mono font-bold block w-full truncate ${statusBadgeClass}" title="${coin.status_aksi}">● ${coin.status_aksi}</span>
                         </td>
-                        <td class="p-4">${performanceContent}</td>
-                        <td class="p-4 font-mono text-right text-xs">${strategicBlock}</td>
+                        <td class="p-4 overflow-hidden">${performanceContent}</td>
+                        <td class="p-4 font-mono text-right text-xs overflow-hidden">${strategicBlock}</td>
                     </tr>
                 `;
             });
@@ -441,6 +441,7 @@
             }
         }
 
+        // Sinkronisasi data struktural berat dari server diatur setiap 12 detik
         setInterval(updateDashboardData, 12000);
         updateDashboardData();
     </script>
