@@ -431,10 +431,10 @@ def trigger_engine_startup():
 @app.route('/')
 def index(): 
     return render_template('index.html')
-
 @app.route('/api/data', methods=['POST'])
 def get_data():
-    global GLOBAL_PORTFOLIO_DYNAMICS, GLOBAL_TRAILING_PEAKS
+    # PERBAIKAN: Menambahkan MARKET_DATA_CACHE ke deklarasi global agar bisa dibaca & diurutkan
+    global GLOBAL_PORTFOLIO_DYNAMICS, GLOBAL_TRAILING_PEAKS, MARKET_DATA_CACHE
     
     req = request.json or {}
     device_id = req.get("device_id", "default_guest_device")
@@ -447,7 +447,19 @@ def get_data():
     except Exception as e:
         print(f"Failed to synchronize device dynamic cache: {e}")
             
-    # PERBAIKAN STABILITAS: Ambil langsung hasil olahan dari latar belakang demi menghindari tabrakan loop gunicorn
+    # ==================== FITUR ANTI-MACET (COLD-START FAIL-SAFE) ====================
+    # Jika background thread belum selesai mengunduh data saat user membuka web pertama kali,
+    # paksa aplikasi untuk melakukan pemindaian instan sekali saja agar tabel tidak kosong.
+    if not MARKET_DATA_CACHE:
+        print("Initial cache is empty! Executing forced cold-start scan...")
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(execute_one_market_scan(target_device_id=device_id))
+        except Exception as e:
+            print(f"Forced cold-start scan failed: {e}")
+    # =================================================================================
+            
     active_portfolio = GLOBAL_PORTFOLIO_DYNAMICS.get(device_id, {})
     for item in MARKET_DATA_CACHE:
         coin = item["koin"]
