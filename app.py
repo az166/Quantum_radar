@@ -232,7 +232,7 @@ def hitung_matriks_atr_dinamis(live_price, entry_price, atr, vol_spike_ratio, wh
         base_tp_multiplier -= 0.6  # Ambil untung secepat mungkin (Hit and Run Mode)
         base_cl_multiplier -= 0.3  # Amankan modal lebih ketat jika pasar mendadak crash
 
-    # Pastikan pengali tidak jatuh ke angka negatif akibat pengurangan ekstrim
+    # Pastikan pengali tidak jatuh ke angka negatif akibat penurunan ekstrim
     base_tp_multiplier = max(1.2, base_tp_multiplier)
     base_cl_multiplier = max(1.0, base_cl_multiplier)
 
@@ -361,12 +361,11 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
                 if device_id not in GLOBAL_TRAILING_PEAKS:
                     GLOBAL_TRAILING_PEAKS[device_id] = {}
                 
-                # Ambil puncak lama atau gunakan harga saat ini sebagai acuan awal
                 old_peak = GLOBAL_TRAILING_PEAKS[device_id].get(coin_name, entry_price)
                 current_peak = max(old_peak, live_price)
                 GLOBAL_TRAILING_PEAKS[device_id][coin_name] = current_peak
 
-            # EKSEKUSI SOLUSI UTAMA: Pemanggilan fungsi matriks atr dinamis kelas institusi
+            # EKSEKUSI UTAMA: Pemanggilan fungsi matriks atr dinamis kelas institusi
             dynamic_tp, dynamic_cl = hitung_matriks_atr_dinamis(
                 live_price=live_price,
                 entry_price=entry_price,
@@ -419,7 +418,8 @@ async def execute_one_market_scan(target_device_id=None):
     
     client = get_async_client()
     try:
-        semaphore = asyncio.with_statement if hasattr(asyncio, 'with_statement') else asyncio.Semaphore(4)  
+        # PERBAIKAN UTAMA: Semaphore diinisialisasi ulang secara segar pada setiap loop panggilan
+        semaphore = asyncio.Semaphore(4)  
         await check_bitcoin_circuit_breaker(client)
         ticker_master_data = await get_combined_tickers_data_async(client)
         
@@ -475,7 +475,6 @@ def get_data():
     
     try:
         GLOBAL_PORTFOLIO_DYNAMICS[device_id] = req.get("portfolio", {})
-        # Bersihkan riwayat puncak trailing stop untuk koin yang sudah dihapus dari portofolio klien
         if device_id in GLOBAL_TRAILING_PEAKS:
             active_coins = GLOBAL_PORTFOLIO_DYNAMICS[device_id].keys()
             GLOBAL_TRAILING_PEAKS[device_id] = {k: v for k, v in GLOBAL_TRAILING_PEAKS[device_id].items() if k in active_coins}
@@ -490,7 +489,6 @@ def get_data():
         except Exception as e:
             print(f"Instant fallback scan failed: {e}")
     else:
-        # PERBAIKAN TIMESTAMPS OVERRIDE DENGAN ATR DINAMIS:
         active_portfolio = GLOBAL_PORTFOLIO_DYNAMICS.get(device_id, {})
         for item in MARKET_DATA_CACHE:
             coin = item["koin"]
@@ -500,7 +498,6 @@ def get_data():
                 item["amount"] = coin_p_data.get("amount", 0.0)
                 item["entry"] = coin_p_data.get("costPrice", 0.0)
                 
-                # Sinkronisasi manajer puncak trailing stop pada jalur cache data kilat
                 current_peak = 0.0
                 if item["entry"] > 0 and item["amount"] > 0:
                     if device_id not in GLOBAL_TRAILING_PEAKS:
@@ -509,7 +506,6 @@ def get_data():
                     current_peak = max(old_peak, item["harga"])
                     GLOBAL_TRAILING_PEAKS[device_id][coin] = current_peak
 
-                # Hitung ulang kalkulasi spesifik PNL & pembaruan batas ATR dinamis per perangkat
                 if item["entry"] > 0 and item["amount"] > 0:
                     dtp, dcl = hitung_matriks_atr_dinamis(
                         live_price=item["harga"],
@@ -535,7 +531,6 @@ def get_data():
                 item["amount"] = 0.0
                 item["entry"] = 0.0
                 
-                # Recalculate target scan non-portfolio menggunakan matriks dinamis tanpa track peak
                 dtp, dcl = hitung_matriks_atr_dinamis(
                     live_price=item["harga"],
                     entry_price=0.0,
