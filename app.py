@@ -2,7 +2,7 @@ from flask import Flask, render_template, jsonify, request
 import httpx
 import asyncio
 import time
-from threading import Thread, Lock
+from threading import Thread
 
 app = Flask(__name__)
 
@@ -13,7 +13,7 @@ ENGINE_INITIALIZED = False
 
 # Variabel optimasi untuk mendeteksi cache kedaluwarsa (TTL)
 LAST_SUCCESSFUL_SCAN_TIME = 0
-CACHE_TTL_SECONDS = 120  
+CACHE_TTL_SECONDS = 120  # Maksimal 2 menit data dianggap valid jika engine macet
 
 # Set pencarian cepat O(1) untuk menyaring koin hitam (Blacklist)
 COIN_BLACKLIST = {'UPUSDT', 'DOWNUSDT', 'BUSDUSDT', 'USDCUSDT', 'FDUSDUSDT', 'EURUSDT'}
@@ -26,11 +26,23 @@ TELEGRAM_CHAT_ID = "@cryptoradar_quantum"
 LIVE_PRICE_MAP = {}
 GLOBAL_BTC_STATUS = {"is_safe": True, "reason": "Connecting"}
 
-# Struktur data multi-device: { "device_id_1": {"SOL": {...}}, "device_id_2": {"BTC": {...}} }
+# Menyimpan riwayat harga tertinggi portofolio untuk keperluan Trailing Stop Dinamis
+# Format data: { "device_id": { "COIN": harga_tertinggi_sejak_entry } }
+GLOBAL_TRAILING_PEAKS = {}
+
+# Struktur nested dictionary untuk isolasi multi-device
 GLOBAL_PORTFOLIO_DYNAMICS = {} 
 
-# Lock thread-safe untuk mengamankan data global antar thread
-data_lock = Lock()
+ASYNC_CLIENT_POOL = None
+
+def get_async_client():
+    global ASYNC_CLIENT_POOL
+    if ASYNC_CLIENT_POOL is None or ASYNC_CLIENT_POOL.is_closed:
+        ASYNC_CLIENT_POOL = httpx.AsyncClient(
+            limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
+            timeout=httpx.Timeout(5.0)
+        )
+    return ASYNC_CLIENT_POOL
 
 def send_telegram_alert_sync(message):
     if not TELEGRAM_TOKEN or "ENTER_TOKEN" in TELEGRAM_TOKEN:
@@ -58,17 +70,15 @@ async def check_bitcoin_circuit_breaker(client):
             btc_open_1h = float(klines[-1][1])
             btc_change_1h = ((live_btc - btc_open_1h) / btc_open_1h) * 100
             
-            with data_lock:
-                if btc_change_1h <= -1.5:
-                    GLOBAL_BTC_STATUS = {"is_safe": False, "reason": f"BTC DUMP ({btc_change_1h:.1f}%)"}
-                elif live_btc < btc_ma24:
-                    GLOBAL_BTC_STATUS = {"is_safe": False, "reason": "BTC BEARISH (Below MA24)"}
-                else:
-                    GLOBAL_BTC_STATUS = {"is_safe": True, "reason": "BTC SAFE"}
+            if btc_change_1h <= -1.5:
+                GLOBAL_BTC_STATUS = {"is_safe": False, "reason": f"BTC DUMP ({btc_change_1h:.1f}%)"}
+            elif live_btc < btc_ma24:
+                GLOBAL_BTC_STATUS = {"is_safe": False, "reason": "BTC BEARISH (Below MA24)"}
+            else:
+                GLOBAL_BTC_STATUS = {"is_safe": True, "reason": "BTC SAFE"}
     except Exception as e:
         print(f"Error checking BTC status: {e}")
-        with data_lock:
-            GLOBAL_BTC_STATUS = {"is_safe": True, "reason": "BTC CHECK DELAYED"}
+        GLOBAL_BTC_STATUS = {"is_safe": True, "reason": "BTC CHECK DELAYED"}
 
 async def get_combined_tickers_data_async(client):
     url = "https://api.binance.com/api/v3/ticker/24hr"
@@ -83,8 +93,7 @@ async def get_combined_tickers_data_async(client):
                 symbol = t['symbol']
                 if symbol.endswith('USDT') and (symbol not in COIN_BLACKLIST):
                     live_p = float(t['lastPrice'])
-                    with data_lock:
-                        LIVE_PRICE_MAP[symbol] = live_p
+                    LIVE_PRICE_MAP[symbol] = live_p
                     
                     filtered_list.append({
                         "symbol": symbol,
@@ -96,10 +105,9 @@ async def get_combined_tickers_data_async(client):
             top_50_symbols = [item['symbol'] for item in filtered_list[:50]]
             
             portfolio_symbols = []
-            with data_lock:
-                for dev_id, proto_data in GLOBAL_PORTFOLIO_DYNAMICS.items():
-                    if isinstance(proto_data, dict):
-                        portfolio_symbols.extend([f"{coin}USDT" for coin in proto_data.keys()])
+            for dev_id, proto_data in GLOBAL_PORTFOLIO_DYNAMICS.items():
+                if isinstance(proto_data, dict):
+                    portfolio_symbols.extend([f"{coin}USDT" for coin in proto_data.keys()])
                 
             target_symbols = list(set(top_50_symbols + portfolio_symbols))
             
@@ -110,10 +118,9 @@ async def get_combined_tickers_data_async(client):
                         "price_change_pct_24h": item['price_change_pct_24h']
                     }
             
-            with data_lock:
-                for sym in target_symbols:
-                    if sym not in LIVE_PRICE_MAP:
-                        LIVE_PRICE_MAP[sym] = 0.0
+            for sym in target_symbols:
+                if sym not in LIVE_PRICE_MAP:
+                    LIVE_PRICE_MAP[sym] = 0.0
 
             return ticker_dict
     except Exception as e:
@@ -195,8 +202,63 @@ def calculate_atr_and_spread(klines_1d, klines_1h):
     recent_spreads = [float(k[2]) - float(k[3]) for k in klines_1h[-6:-1]]
     return atr, current_spread / (sum(recent_spreads) / len(recent_spreads) if recent_spreads else 1)
 
-async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, semaphore):
-    global LAST_ALERTS_STATE
+# ==================== FUNGSI MATRIKS STRATEGI DINAMIS KELAS INSTITUSI ====================
+def hitung_matriks_atr_dinamis(live_price, entry_price, atr, vol_spike_ratio, whale_dominance, is_btc_safe, highest_peak=0.0):
+    """
+    Mengintegrasikan 4 metode analisis dinamis:
+    1. Rasio Volume Spike (Memperluas TP saat ada ledakan volume)
+    2. Whale Dominance (Memperlebar CL untuk menghindari jebakan stop-loss hunting)
+    3. Proteksi Sinyal BTC (Menyempitkan target demi keselamatan modal saat pasar crash)
+    4. Sistem Trailing Stop Dinamis (Mengunci profit seiring naiknya harga dasar koin)
+    """
+    # Pengali acuan standar profesional
+    base_tp_multiplier = 2.0
+    base_cl_multiplier = 1.5
+
+    # METODE 1: Modifikasi Target Keuntungan Berdasarkan Dorongan Bahan Bakar Volume Spike
+    if vol_spike_ratio > 3.0:
+        base_tp_multiplier += 0.6  
+    elif vol_spike_ratio > 1.8:
+        base_tp_multiplier += 0.3
+
+    # METODE 2: Antisipasi Manipulasi Bandar Berdasarkan Data Whale Dominance
+    if whale_dominance > 75.0:
+        base_cl_multiplier += 0.4  # Memberi ruang napas tambahan agar tidak terkena manipulasi sumbu lilin
+    elif whale_dominance > 55.0:
+        base_cl_multiplier += 0.2
+
+    # METODE 3: Pengetatan Risiko Menyeluruh Sesuai Kondisi Rezim Pasar Induk (Bitcoin)
+    if not is_btc_safe:
+        base_tp_multiplier -= 0.6  # Ambil untung secepat mungkin (Hit and Run Mode)
+        base_cl_multiplier -= 0.3  # Amankan modal lebih ketat jika pasar mendadak crash
+
+    # Pastikan pengali tidak jatuh ke angka negatif akibat pengurangan ekstrim
+    base_tp_multiplier = max(1.2, base_tp_multiplier)
+    base_cl_multiplier = max(1.0, base_cl_multiplier)
+
+    # Eksekusi kalkulasi target harga dasar
+    if entry_price > 0:
+        # Perhitungan awal berdasarkan harga masuk (Cost Base)
+        tp_level = entry_price + (base_tp_multiplier * atr)
+        cl_level = entry_price - (base_cl_multiplier * atr)
+        
+        # METODE 4: Penerapan Sistem Trailing Stop Dinamis Mengikuti Jejak Puncak Tertinggi Pasar
+        if highest_peak > entry_price:
+            # Batas toleransi penurunan dari harga tertinggi adalah 1.2 kali jarak ATR dinamis
+            trailing_stop_floor = highest_peak - (1.2 * atr)
+            # Jika batas bawah lantai trailing lebih tinggi dari CL awal, geser CL naik untuk mengunci profit
+            if trailing_stop_floor > cl_level:
+                cl_level = trailing_stop_floor
+    else:
+        # Untuk koin pemindaian yang belum dibeli
+        tp_level = live_price + (base_tp_multiplier * atr)
+        cl_level = live_price - (base_cl_multiplier * atr)
+
+    return tp_level, cl_level
+# =========================================================================================
+
+async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, semaphore, device_id="default_guest_device"):
+    global LAST_ALERTS_STATE, GLOBAL_TRAILING_PEAKS
     async with semaphore:
         task_1w = fetch_klines_safely_async(client, symbol, '1w', 4)   
         task_1d = fetch_klines_safely_async(client, symbol, '1d', 105)  
@@ -210,9 +272,7 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
             w1_close, w2_close = float(klines_1w[-2][4]), float(klines_1w[-3][4])
             is_macro_bullish = w1_close >= w2_close  
             
-            with data_lock:
-                live_price = LIVE_PRICE_MAP.get(symbol, float(klines_1h[-1][4]))
-            
+            live_price = LIVE_PRICE_MAP.get(symbol, float(klines_1h[-1][4]))
             open_price = float(klines_1h[-1][1])
             price_pct_1h = ((live_price - open_price) / open_price) * 100
             atr, spread_ratio = calculate_atr_and_spread(klines_1d, klines_1h)
@@ -267,13 +327,9 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
             elif is_whale_churning and price_pct_1h > 0:
                 fase = "WHALE CHURNING (HIGH RISK)"
 
-            with data_lock:
-                current_btc_safe = GLOBAL_BTC_STATUS["is_safe"]
-                btc_reason = GLOBAL_BTC_STATUS["reason"]
-
-            if not current_btc_safe and coin_name not in user_portfolio:
+            if not GLOBAL_BTC_STATUS["is_safe"] and coin_name not in user_portfolio:
                 status_rencana_otomatis = "WAIT & SEE"
-                fase = f"ENGINE LOCKED ({btc_reason})"
+                fase = f"ENGINE LOCKED ({GLOBAL_BTC_STATUS['reason']})"
             else:
                 if fase in ["INSTITUTIONAL BUY", "VALID BREAKOUT", "EARLY RALLY", "EARLY RALLY (WEAK VOL)"]:
                     status_rencana_otomatis = "BUY STAGE"
@@ -285,7 +341,7 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
             harga_terformat = f"${live_price:.8f}" if live_price < 1.0 else f"${live_price:.4f}"
             
             if coin_name not in LAST_ALERTS_STATE or LAST_ALERTS_STATE[coin_name] != fase:
-                if fase in ["VALID BREAKOUT", "INSTITUTIONAL BUY"] and current_btc_safe and vol_spike_ratio >= 2.5:
+                if fase in ["VALID BREAKOUT", "INSTITUTIONAL BUY"] and GLOBAL_BTC_STATUS["is_safe"] and vol_spike_ratio >= 2.5:
                     emoji = "👑 BRAND NEW MSB!" if fase == "INSTITUTIONAL BUY" else "🔥 BREAKOUT SPIKE"
                     send_telegram_alert_sync(
                         f"{emoji}\n\nCoin: *{coin_name}*\nMarket Structure: `BREAKOUT RESISTANCE`\n"
@@ -299,8 +355,27 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
             entry_price = coin_p_data.get("costPrice", 0.0)
             amount = coin_p_data.get("amount", 0.0)
 
-            dynamic_tp = entry_price + (2 * atr) if entry_price > 0 else 0.0
-            dynamic_cl = entry_price - (1.5 * atr) if entry_price > 0 else 0.0
+            # Manajer Trailing Stop: Perbarui puncak harga tertinggi semenjak aset dibeli
+            current_peak = 0.0
+            if entry_price > 0 and amount > 0:
+                if device_id not in GLOBAL_TRAILING_PEAKS:
+                    GLOBAL_TRAILING_PEAKS[device_id] = {}
+                
+                # Ambil puncak lama atau gunakan harga saat ini sebagai acuan awal
+                old_peak = GLOBAL_TRAILING_PEAKS[device_id].get(coin_name, entry_price)
+                current_peak = max(old_peak, live_price)
+                GLOBAL_TRAILING_PEAKS[device_id][coin_name] = current_peak
+
+            # EKSEKUSI SOLUSI UTAMA: Pemanggilan fungsi matriks atr dinamis kelas institusi
+            dynamic_tp, dynamic_cl = hitung_matriks_atr_dinamis(
+                live_price=live_price,
+                entry_price=entry_price,
+                atr=atr,
+                vol_spike_ratio=vol_spike_ratio,
+                whale_dominance=whale_dominance,
+                is_btc_safe=GLOBAL_BTC_STATUS["is_safe"],
+                highest_peak=current_peak
+            )
 
             max_allowed_atr = live_price * 0.15
             smoothed_atr = min(atr, max_allowed_atr) if atr > 0 else (live_price * 0.02)
@@ -317,6 +392,7 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
             if entry_price > 0:
                 if live_price >= dynamic_tp: status_rencana_otomatis = "TAKE PROFIT"
                 elif live_price <= dynamic_cl: status_rencana_otomatis = "CUT LOSS"
+                else: status_rencana_otomatis = "HOLDING"
                 saran_entry = live_price - (0.75 * smoothed_atr)
 
             pnl_val, pnl_pct, current_value = 0.0, 0.0, 0.0
@@ -341,56 +417,40 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
 async def execute_one_market_scan(target_device_id=None):
     global MARKET_DATA_CACHE, LAST_SUCCESSFUL_SCAN_TIME
     
-    async with httpx.AsyncClient(
-        limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
-        timeout=httpx.Timeout(6.0)
-    ) as client:
-        try:
-            semaphore = asyncio.max_connections if hasattr(asyncio, 'max_connections') else asyncio.Semaphore(5)
-            await check_bitcoin_circuit_breaker(client)
-            ticker_master_data = await get_combined_tickers_data_async(client)
+    client = get_async_client()
+    try:
+        semaphore = asyncio.with_statement if hasattr(asyncio, 'with_statement') else asyncio.Semaphore(4)  
+        await check_bitcoin_circuit_breaker(client)
+        ticker_master_data = await get_combined_tickers_data_async(client)
+        
+        if not ticker_master_data:
+            return
             
-            if not ticker_master_data:
-                return
-                
-            active_portfolio = {}
-            if target_device_id:
-                with data_lock:
-                    if target_device_id in GLOBAL_PORTFOLIO_DYNAMICS:
-                        active_portfolio = dict(GLOBAL_PORTFOLIO_DYNAMICS[target_device_id])
-                
-            tasks = [process_single_coin_pipeline(client, symbol, m_data, active_portfolio, semaphore) for symbol, m_data in ticker_master_data.items()]
-            results = await asyncio.gather(*tasks)
-            temp_data = [r for r in results if r is not None]
+        active_portfolio = {}
+        dev_id_key = target_device_id if target_device_id else "default_guest_device"
+        if target_device_id and target_device_id in GLOBAL_PORTFOLIO_DYNAMICS:
+            active_portfolio = GLOBAL_PORTFOLIO_DYNAMICS[target_device_id]
             
-            temp_data.sort(key=lambda x: (x['is_portfolio'], x['skor']), reverse=True)
-            
-            with data_lock:
-                MARKET_DATA_CACHE = temp_data
-                LAST_SUCCESSFUL_SCAN_TIME = time.time()
-        except Exception as e:
-            print(f"Error during core scan execution: {e}")
+        tasks = [process_single_coin_pipeline(client, symbol, m_data, active_portfolio, semaphore, dev_id_key) for symbol, m_data in ticker_master_data.items()]
+        results = await asyncio.gather(*tasks)
+        temp_data = [r for r in results if r is not None]
+        
+        temp_data.sort(key=lambda x: (x['is_portfolio'], x['skor']), reverse=True)
+        MARKET_DATA_CACHE = temp_data
+        
+        LAST_SUCCESSFUL_SCAN_TIME = time.time()
+    except Exception as e:
+        print(f"Error during core scan execution: {e}")
 
 def run_loop_in_bg():
-    # PERBAIKAN: Jalankan scan pertama secara instan sebelum masuk loop interval
-    try:
-        init_loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(init_loop)
-        init_loop.run_until_complete(execute_one_market_scan())
-        init_loop.close()
-        print("Initial engine scan successfully completed.")
-    except Exception as e:
-        print(f"Initial Background Scan Failed: {e}")
-
     while True:
-        time.sleep(15)  
         try:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             loop.run_until_complete(execute_one_market_scan())
-            loop.close()
         except Exception as e:
             print(f"Background Loop Error: {e}")
+        time.sleep(15)  
 
 @app.before_request
 def trigger_engine_startup():
@@ -405,87 +465,103 @@ def index():
 
 @app.route('/api/data', methods=['POST'])
 def get_data():
-    global GLOBAL_PORTFOLIO_DYNAMICS, MARKET_DATA_CACHE
+    global GLOBAL_PORTFOLIO_DYNAMICS, GLOBAL_TRAILING_PEAKS
     
     current_time = time.time()
-    with data_lock:
-        is_cache_stale = (current_time - LAST_SUCCESSFUL_SCAN_TIME) > CACHE_TTL_SECONDS
+    is_cache_stale = (current_time - LAST_SUCCESSFUL_SCAN_TIME) > CACHE_TTL_SECONDS
     
     req = request.json or {}
     device_id = req.get("device_id", "default_guest_device")
     
-    with data_lock:
-        try:
-            GLOBAL_PORTFOLIO_DYNAMICS[device_id] = req.get("portfolio", {})
-        except Exception as e:
-            print(f"Failed to synchronize device dynamic cache: {e}")
+    try:
+        GLOBAL_PORTFOLIO_DYNAMICS[device_id] = req.get("portfolio", {})
+        # Bersihkan riwayat puncak trailing stop untuk koin yang sudah dihapus dari portofolio klien
+        if device_id in GLOBAL_TRAILING_PEAKS:
+            active_coins = GLOBAL_PORTFOLIO_DYNAMICS[device_id].keys()
+            GLOBAL_TRAILING_PEAKS[device_id] = {k: v for k, v in GLOBAL_TRAILING_PEAKS[device_id].items() if k in active_coins}
+    except Exception as e:
+        print(f"Failed to synchronize device dynamic cache: {e}")
     
-    # Jika cache kosong atau usang, gunakan data lama yang ada dulu (non-blocking) daripada macet total
     if not MARKET_DATA_CACHE or is_cache_stale:
-        # Jalankan fallback di thread terpisah agar router Flask langsung merespon tanpa lambat
-        def force_fallback():
-            try:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(execute_one_market_scan(target_device_id=device_id))
-                loop.close()
-            except Exception as ex:
-                print(f"Async fallback runtime failed: {ex}")
-        Thread(target=force_fallback).start()
-            
-    with data_lock:
-        active_portfolio = dict(GLOBAL_PORTFOLIO_DYNAMICS.get(device_id, {}))
-        local_cache_copy = list(MARKET_DATA_CACHE)
-        current_btc_status = dict(GLOBAL_BTC_STATUS)
-
-    # Kirim data dummy/kosong terformat jika server benar-benar baru menyala
-    if not local_cache_copy:
-        return jsonify({
-            "btc_status": current_btc_status,
-            "market": []
-        })
-
-    for item in local_cache_copy:
-        coin = item["koin"]
-        if coin in active_portfolio:
-            item["is_portfolio"] = True
-            coin_p_data = active_portfolio[coin]
-            item["amount"] = coin_p_data.get("amount", 0.0)
-            item["entry"] = coin_p_data.get("costPrice", 0.0)
-            
-            if item["entry"] > 0 and item["amount"] > 0:
-                item["tp"] = item["entry"] + (2 * item["atr"])
-                item["cl"] = item["entry"] - (1.5 * item["atr"])
-                item["current_value"] = item["amount"] * item["harga"]
-                initial_val = item["amount"] * item["entry"]
-                item["pnl_val"] = item["current_value"] - initial_val
-                item["pnl_pct"] = (item["pnl_val"] / initial_val) * 100
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(execute_one_market_scan(target_device_id=device_id))
+        except Exception as e:
+            print(f"Instant fallback scan failed: {e}")
+    else:
+        # PERBAIKAN TIMESTAMPS OVERRIDE DENGAN ATR DINAMIS:
+        active_portfolio = GLOBAL_PORTFOLIO_DYNAMICS.get(device_id, {})
+        for item in MARKET_DATA_CACHE:
+            coin = item["koin"]
+            if coin in active_portfolio:
+                item["is_portfolio"] = True
+                coin_p_data = active_portfolio[coin]
+                item["amount"] = coin_p_data.get("amount", 0.0)
+                item["entry"] = coin_p_data.get("costPrice", 0.0)
                 
-                if item["harga"] >= item["tp"]: item["status_aksi"] = "TAKE PROFIT"
-                elif item["harga"] <= item["cl"]: item["status_aksi"] = "CUT LOSS"
-                else: item["status_aksi"] = "HOLDING"
-        else:
-            item["is_portfolio"] = False
-            item["amount"] = 0.0
-            item["entry"] = 0.0
-            item["tp"] = 0.0
-            item["cl"] = 0.0
-            item["pnl_val"] = 0.0
-            item["pnl_pct"] = 0.0
-            item["current_value"] = 0.0
-            if "ENGINE LOCKED" not in item["fase"]:
-                if item["fase"] in ["INSTITUTIONAL BUY", "VALID BREAKOUT", "EARLY RALLY", "EARLY RALLY (WEAK VOL)"]:
-                    item["status_aksi"] = "BUY STAGE"
-                elif item["fase"] == "OVERBOUGHT PEAK":
-                    item["status_aksi"] = "TAKE PROFIT"
-                else:
-                    item["status_aksi"] = "WAIT & SEE"
+                # Sinkronisasi manajer puncak trailing stop pada jalur cache data kilat
+                current_peak = 0.0
+                if item["entry"] > 0 and item["amount"] > 0:
+                    if device_id not in GLOBAL_TRAILING_PEAKS:
+                        GLOBAL_TRAILING_PEAKS[device_id] = {}
+                    old_peak = GLOBAL_TRAILING_PEAKS[device_id].get(coin, item["entry"])
+                    current_peak = max(old_peak, item["harga"])
+                    GLOBAL_TRAILING_PEAKS[device_id][coin] = current_peak
+
+                # Hitung ulang kalkulasi spesifik PNL & pembaruan batas ATR dinamis per perangkat
+                if item["entry"] > 0 and item["amount"] > 0:
+                    dtp, dcl = hitung_matriks_atr_dinamis(
+                        live_price=item["harga"],
+                        entry_price=item["entry"],
+                        atr=item["atr"],
+                        vol_spike_ratio=item["rasio"],
+                        whale_dominance=item["whale"],
+                        is_btc_safe=GLOBAL_BTC_STATUS["is_safe"],
+                        highest_peak=current_peak
+                    )
+                    item["tp"] = dtp
+                    item["cl"] = dcl
+                    item["current_value"] = item["amount"] * item["harga"]
+                    initial_val = item["amount"] * item["entry"]
+                    item["pnl_val"] = item["current_value"] - initial_val
+                    item["pnl_pct"] = (item["pnl_val"] / initial_val) * 100
                     
-    local_cache_copy.sort(key=lambda x: (x['is_portfolio'], x['skor']), reverse=True)
-    
+                    if item["harga"] >= item["tp"]: item["status_aksi"] = "TAKE PROFIT"
+                    elif item["harga"] <= item["cl"]: item["status_aksi"] = "CUT LOSS"
+                    else: item["status_aksi"] = "HOLDING"
+            else:
+                item["is_portfolio"] = False
+                item["amount"] = 0.0
+                item["entry"] = 0.0
+                
+                # Recalculate target scan non-portfolio menggunakan matriks dinamis tanpa track peak
+                dtp, dcl = hitung_matriks_atr_dinamis(
+                    live_price=item["harga"],
+                    entry_price=0.0,
+                    atr=item["atr"],
+                    vol_spike_ratio=item["rasio"],
+                    whale_dominance=item["whale"],
+                    is_btc_safe=GLOBAL_BTC_STATUS["is_safe"]
+                )
+                item["tp"] = dtp
+                item["cl"] = dcl
+                item["pnl_val"] = 0.0
+                item["pnl_pct"] = 0.0
+                item["current_value"] = 0.0
+                if "ENGINE LOCKED" not in item["fase"]:
+                    if item["fase"] in ["INSTITUTIONAL BUY", "VALID BREAKOUT", "EARLY RALLY", "EARLY RALLY (WEAK VOL)"]:
+                        item["status_aksi"] = "BUY STAGE"
+                    elif item["fase"] == "OVERBOUGHT PEAK":
+                        item["status_aksi"] = "TAKE PROFIT"
+                    else:
+                        item["status_aksi"] = "WAIT & SEE"
+                        
+        MARKET_DATA_CACHE.sort(key=lambda x: (x['is_portfolio'], x['skor']), reverse=True)
+        
     return jsonify({
-        "btc_status": current_btc_status,
-        "market": local_cache_copy
+        "btc_status": GLOBAL_BTC_STATUS,
+        "market": MARKET_DATA_CACHE
     })
 
 @app.route('/api/telegram/send_manual', methods=['POST'])
