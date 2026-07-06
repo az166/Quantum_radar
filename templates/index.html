@@ -61,10 +61,10 @@
                 <table class="w-full text-left border-collapse table-fixed min-w-[1000px]">
                     <thead>
                         <tr class="bg-gray-950/80 text-gray-400 text-xs font-bold uppercase tracking-wider border-b border-gray-800">
-                            <th class="p-4 w-[22%]">Coin / Structural Analysis</th>
+                            <th class="p-4 w-[26%]">Coin / Structural Analysis</th>
                             <th class="p-4 w-[12%]">Live Price</th>
-                            <th class="p-4 text-center w-[9%]">Action</th>
-                            <th class="p-4 text-center w-[9%]">Telegram</th>
+                            <th class="p-4 text-center w-[9%]">➕</th>
+                            <th class="p-4 text-center w-[5%]">Telegram</th>
                             <th class="p-4 text-center w-[15%]">Plan Status</th>
                             <th class="p-4 w-[18%]">Asset Performance & TP Progress</th>
                             <th class="p-4 text-right w-[15%]">ATR Strategic Matrix</th>
@@ -440,7 +440,7 @@
                             <div class="text-xs ${priceChangeClass} font-bold mt-0.5 truncate">${coin.persen_harga >= 0 ? '+' : ''}${(coin.persen_harga || 0).toFixed(2)}%</div>
                         </td>
                         <td class="p-4 text-center overflow-hidden">
-                            <button onclick="openModal('${coin.koin}', ${coin.amount}, ${coin.entry})" class="bg-indigo-600/10 text-indigo-400 hover:bg-indigo-600/30 border border-indigo-500/20 px-2 py-1 rounded text-xs font-bold transition cursor-pointer block w-full truncate">Manage</button>
+                            <button onclick="openModal('${coin.koin}', ${coin.amount}, ${coin.entry})" class="bg-indigo-600/10 text-indigo-400 hover:bg-indigo-600/30 border border-indigo-500/20 px-2 py-1 rounded text-xs font-bold transition cursor-pointer block w-full truncate">➕</button>
                         </td>
                         <td class="p-4 text-center overflow-hidden">
                             <button onclick="sendTelegramManual(this, '${coin.koin}')" class="bg-amber-600/10 text-amber-400 hover:bg-amber-600/30 border border-amber-500/20 px-2 py-1 rounded text-xs font-bold transition flex items-center justify-center gap-1 w-full cursor-pointer truncate">✈️ Send</button>
