@@ -3,6 +3,7 @@ from flask import Flask, render_template, jsonify, request
 import httpx
 import asyncio
 import time
+import copy
 from threading import Thread
 
 app = Flask(__name__)
@@ -33,14 +34,15 @@ GLOBAL_TRAILING_PEAKS = {}
 # Struktur nested dictionary untuk isolasi multi-device
 GLOBAL_PORTFOLIO_DYNAMICS = {} 
 
-def send_telegram_alert_sync(message):
+async def send_telegram_alert_async(message):
+    """Mengirim notifikasi Telegram secara asinkronus tanpa memblokir event loop."""
     if not TELEGRAM_TOKEN or "ENTER_TOKEN" in TELEGRAM_TOKEN:
         return False
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
     try:
-        with httpx.Client() as client:
-            res = client.post(url, json=payload, timeout=5)
+        async with httpx.AsyncClient() as client:
+            res = await client.post(url, json=payload, timeout=5)
             return res.status_code == 200
     except Exception as e:
         print(f"Failed to send Telegram alert: {e}")
@@ -131,7 +133,6 @@ def calculate_ma(prices, period):
     return sum(prices[-period:]) / period
 
 def calculate_std_dev(prices, period):
-    """Menghitung Standar Deviasi untuk Bollinger Bands & Z-Score dengan pengaman pembagian nol"""
     if len(prices) < period: 
         return 0.00001
     ma = sum(prices[-period:]) / period
@@ -139,13 +140,11 @@ def calculate_std_dev(prices, period):
     return math.sqrt(variance) if variance > 0 else 0.00001
 
 def detect_bullish_divergence(prices, macd_hists, period=10):
-    """Mendeteksi Bullish Divergence (Awal Pembalikan Tren/Reversal)"""
     if len(prices) < period or len(macd_hists) < period: 
         return False
     
     recent_prices = prices[-period:]
     recent_macd = macd_hists[-period:]
-    
     min_p_idx = recent_prices.index(min(recent_prices))
     
     if 0 < min_p_idx < period - 1:
@@ -182,17 +181,20 @@ def calculate_macd_efficient(prices):
         current_signal = (m_val * signal_alpha) + (current_signal * (1 - signal_alpha))
 
     current_macd = macd_line[-1]
-    
-    hist_list = []
-    # Membuat deret historis MACD Histogram yang valid untuk analisis divergensi
-    for m_v in macd_line:
-        hist_list.append(m_v - current_signal)
+    hist_list = [m_v - current_signal for m_v in macd_line]
 
     return current_macd, current_signal, current_macd - current_signal, hist_list
 
 def extract_market_structure_and_vol_ma(klines_1h):
     volumes = [float(k[7]) for k in klines_1h]
-    vol_ma20 = sum(volumes[-21:-1]) / 20 if len(volumes) >= 21 else 1.0
+    
+    # Perbaikan kalkulasi rata-rata volume agar fleksibel dan tidak hardcode pembagi ke 1.0 jika data kurang
+    if len(volumes) > 1:
+        historical_vols = volumes[:-1]
+        vol_ma20 = sum(historical_vols[-20:]) / min(len(historical_vols), 20)
+    else:
+        vol_ma20 = 1.0
+
     highs_48h = [float(k[2]) for k in klines_1h[-49:-1]]
     local_swing_high = max(highs_48h) if highs_48h else 0.0
 
@@ -229,17 +231,19 @@ def hitung_matriks_atr_dinamis(live_price, entry_price, atr, vol_spike_ratio, wh
     elif vol_spike_ratio > 1.8:
         base_tp_multiplier += 0.3
 
+    # OPTIMASI RISIKO: Ketika dominasi whale terlalu ekstrem, perketat jarak Cut Loss (multiplier diperkecil) 
+    # untuk meminimalkan risiko manipulasi/dump mendadak oleh sekelompok entitas besar.
     if whale_dominance > 75.0:
-        base_cl_multiplier += 0.4  
+        base_cl_multiplier -= 0.3  
     elif whale_dominance > 55.0:
-        base_cl_multiplier += 0.2
+        base_cl_multiplier -= 0.1
 
     if not is_btc_safe:
         base_tp_multiplier -= 0.6  
-        base_cl_multiplier -= 0.3  
+        base_cl_multiplier += 0.3  # Jika BTC berbahaya, justru perlebar batas CL agar terhindar dari stop-hunt volatilitas sesaat
 
     base_tp_multiplier = max(1.2, base_tp_multiplier)
-    base_cl_multiplier = max(1.0, base_cl_multiplier)
+    base_cl_multiplier = max(0.8, base_cl_multiplier)
 
     if entry_price > 0:
         tp_level = entry_price + (base_tp_multiplier * atr)
@@ -280,22 +284,23 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
             hourly_closes = [float(k[4]) for k in klines_1h]
             ma25_daily, ma99_daily = calculate_ma(daily_closes, 25), calculate_ma(daily_closes, 99)
 
-            macd_line, signal_line, macd_hist, hist_list = calculate_macd_efficient(hourly_closes)
+            # OPTIMASI: Pindahkan eksekusi matematika MACD berat ke ThreadPool terpisah agar Event Loop utama Flask tidak freeze
+            macd_line, signal_line, macd_hist, hist_list = await asyncio.to_thread(calculate_macd_efficient, hourly_closes)
+            
             is_ma_trend_bullish = live_price > ma25_daily and live_price > ma99_daily
             is_macd_momentum_bullish = macd_hist > 0
 
             live_volume = float(klines_1h[-1][7])
             vol_spike_ratio = live_volume / vol_ma20 if vol_ma20 > 0 else 0
 
-            # =========================================================================
-            # INTEGRASI 4 PARAMETER PENINGKATAN PREDIKSI AWAL TREN (PROAKTIF)
-            # =========================================================================
-            
-            # 1. Volume Velocity (Akselerasi Kecepatan Volume)
+            # OPTIMASI LOGIKA 1: Batas persentase kenaikan harga tidak lagi statis (0.4%), melainkan berbasis volatilitas dinamis (ATR)
+            volatility_based_threshold = max(0.2, min(1.5, (atr / live_price) * 100 * 0.15)) if live_price > 0 else 0.4
+
+            # 1. Volume Velocity
             prev_volume = float(klines_1h[-2][7]) if len(klines_1h) >= 2 else 1.0
             vol_velocity = (live_volume - prev_volume) / prev_volume if prev_volume > 0 else 0.0
 
-            # 2. Volatility Squeeze (Bollinger Bands masuk ke dalam Keltner Channels)
+            # 2. Volatility Squeeze
             std_dev_20 = calculate_std_dev(hourly_closes, 20)
             bb_upper = calculate_ma(hourly_closes, 20) + (2.0 * std_dev_20)
             bb_lower = calculate_ma(hourly_closes, 20) - (2.0 * std_dev_20)
@@ -303,15 +308,13 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
             kc_lower = calculate_ma(hourly_closes, 20) - (1.5 * atr)
             is_squeeze = (bb_upper < kc_upper) and (bb_lower > kc_lower)
 
-            # 3. Bullish Divergence (Sinyal Balik Arah Momentum dari Lembah)
+            # 3. Bullish Divergence
             is_bullish_div = False
             if len(hourly_closes) >= 10 and max(hourly_closes[-10:]) != min(hourly_closes[-10:]):
                 is_bullish_div = detect_bullish_divergence(hourly_closes, hist_list, period=10)
 
-            # 4. Z-Score (Mengukur Kedekatan Rentang Konsolidasi Horizontal)
+            # 4. Z-Score
             z_score = (live_price - ma25_daily) / std_dev_20 if std_dev_20 > 0 else 0.0
-
-            # =========================================================================
 
             market_liquidity_pool = m_data.get("pure_vol_24h", 0)
             if market_liquidity_pool >= 50000000: required_vol_spike = 1.5
@@ -337,33 +340,25 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
             momentum_score = (vol_spike_ratio * 35) + (whale_dominance * 0.5) + (price_pct_1h * 15)
             is_overextended = (live_price > ma25_daily + (2.5 * atr)) and atr > 0
 
-            # -------------------------------------------------------------------------
-            # LOGIKA MATRIKS KLASIFIKASI FASE YANG SAKTI & PROAKTIF
-            # -------------------------------------------------------------------------
             if not GLOBAL_BTC_STATUS["is_safe"] and coin_name not in user_portfolio:
                 fase = f"ENGINE LOCKED ({GLOBAL_BTC_STATUS['reason']})"
                 momentum_score = 0
             else:
-                # Pengecekan dimulai dari Sinyal Prediksi Awal Utama (Proaktif)
-                
-                # Skenario 1: Squeeze Breakout (Ledakan Kompresi Energi Awal Tren)
-                if is_squeeze and vol_velocity > 1.8 and price_pct_1h > 0.3:
+                # Skenario Proaktif Sinyal Awal
+                if is_squeeze and vol_velocity > 1.8 and price_pct_1h > volatility_based_threshold:
                     fase = "⚡ SQUEEZE BREAKOUT (EARLY TREND)"
                     momentum_score += 140
-
-                # Skenario 2: Akumulasi Rahasia oleh Whale (Volume Naik, Harga Flat)
-                elif abs(price_pct_1h) < 0.2 and vol_velocity > 2.5 and abs(z_score) < 0.5:
+                elif abs(price_pct_1h) < volatility_based_threshold and vol_velocity > 2.5 and abs(z_score) < 0.5:
                     fase = "🐳 WHALE ACCUMULATION (SILENT)"
                     momentum_score += 110
-
-                # Skenario 3: Pembalikan Arah Momentum Bullish dari Dasar (Reversal)
-                elif is_bullish_div and price_pct_1h > 0.4:
+                elif is_bullish_div and price_pct_1h > volatility_based_threshold:
                     fase = "🔄 MOMENTUM REVERSAL (BOTTOMING)"
                     momentum_score += 100
-
-                # Skenario Struktur Pasar Konvensional / Reaktif (Kode Lama Anda)
-                elif price_pct_1h > 0.4 and vol_spike_ratio >= required_vol_spike and not is_whale_churning:
-                    if is_msb_breakout and is_macro_bullish and is_ma_trend_bullish and is_macd_momentum_bullish:
+                
+                # Skenario Struktural Konvensional
+                elif price_pct_1h > volatility_based_threshold and vol_spike_ratio >= required_vol_spike and not is_whale_churning:
+                    # OPTIMASI LOGIKA 2 (Hierarki Tren Ketat): Hanya izinkan label INSTITUTIONAL BUY jika posisi harga terkonfirmasi di atas garis tren makro harian (ma99_daily)
+                    if is_msb_breakout and is_macro_bullish and is_ma_trend_bullish and is_macd_momentum_bullish and (live_price > ma99_daily):
                         fase, momentum_score = "INSTITUTIONAL BUY", momentum_score + 150
                     elif is_msb_breakout:
                         fase, momentum_score = "VALID BREAKOUT", momentum_score + 80
@@ -376,7 +371,6 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
                 elif is_whale_churning and price_pct_1h > 0:
                     fase = "WHALE CHURNING (HIGH RISK)"
 
-            # Penentuan Aksi Strategi Otomatis Berdasarkan Modifikasi Fase Baru
             if "ENGINE LOCKED" in fase:
                 status_rencana_otomatis = "WAIT & SEE"
             else:
@@ -389,7 +383,7 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
 
             harga_terformat = f"${live_price:.8f}" if live_price < 1.0 else f"${live_price:.4f}"
 
-            # Logika Pemancar Isyarat Notifikasi Telegram Otomatis
+            # Sinyal Pemancar Isyarat Telegram Otomatis Asinkronus
             if coin_name not in LAST_ALERTS_STATE or LAST_ALERTS_STATE[coin_name] != fase:
                 if fase in ["VALID BREAKOUT", "INSTITUTIONAL BUY", "⚡ SQUEEZE BREAKOUT (EARLY TREND)", "🐳 WHALE ACCUMULATION (SILENT)"] and GLOBAL_BTC_STATUS["is_safe"] and vol_spike_ratio >= 2.0:
                     if fase == "INSTITUTIONAL BUY": emoji = "👑 BRAND NEW MSB!"
@@ -397,7 +391,8 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
                     elif fase == "🐳 WHALE ACCUMULATION (SILENT)": emoji = "🐳 WHALE ACCUMULATION DETECTED"
                     else: emoji = "🔥 BREAKOUT SPIKE"
                     
-                    send_telegram_alert_sync(
+                    # Menggunakan await asinkronus (Tidak menghentikan proses scanning koin lain)
+                    await send_telegram_alert_async(
                         f"{emoji}\n\nCoin: *{coin_name}*\nMarket Phase: `{fase}`\n"
                         f"Vol vs MA20 Speed: `{vol_spike_ratio:.1f}x` (Velocity: {vol_velocity*100:.1f}%)\n"
                         f"Whale Dominance: `{whale_dominance}%` (Z-Score: {z_score:.2f})\n"
@@ -555,8 +550,15 @@ def get_data():
             print(f"Fast bootstrap failed: {e}")
 
     active_portfolio = GLOBAL_PORTFOLIO_DYNAMICS.get(device_id, {})
-    for item in MARKET_DATA_CACHE:
+    
+    # OPTIMASI MULTI-USER: Lakukan isolasi penuh (deep copy) pada data cache utama ke variabel lokal baru 
+    # agar modifikasi data portofolio satu pengguna tidak merusak/terbaca oleh pengguna lain di saat bersamaan.
+    user_market_data = []
+
+    for original_item in MARKET_DATA_CACHE:
+        item = copy.deepcopy(original_item)
         coin = item["koin"]
+        
         if coin in active_portfolio:
             item["is_portfolio"] = True
             coin_p_data = active_portfolio[coin]
@@ -616,12 +618,14 @@ def get_data():
                     item["status_aksi"] = "TAKE PROFIT"
                 else:
                     item["status_aksi"] = "WAIT & SEE"
+                    
+        user_market_data.append(item)
 
-    MARKET_DATA_CACHE.sort(key=lambda x: (x['is_portfolio'], x['skor']), reverse=True)
+    user_market_data.sort(key=lambda x: (x['is_portfolio'], x['skor']), reverse=True)
 
     return jsonify({
         "btc_status": GLOBAL_BTC_STATUS,
-        "market": MARKET_DATA_CACHE
+        "market": user_market_data
     })
 
 @app.route('/api/telegram/send_manual', methods=['POST'])
@@ -650,7 +654,11 @@ def send_manual_alert():
             f"Suggested Entry Trigger: `*{saran_fmt}*`"
         )
 
-        success = send_telegram_alert_sync(msg)
+        # Menjalankan fungsi asinkronus menggunakan event loop bawaan untuk rute sinkron Flask biasa
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        success = loop.run_until_complete(send_telegram_alert_async(msg))
+        
         if success:
             return jsonify({"status": "success", "message": "Signal broadcasted!"})
         return jsonify({"status": "error", "message": "Failed to send message via Telegram."}), 500
