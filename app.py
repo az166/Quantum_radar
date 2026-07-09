@@ -12,10 +12,11 @@ app = Flask(__name__)
 MARKET_DATA_CACHE = []
 LAST_ALERTS_STATE = {}
 ENGINE_INITIALIZED = False
-
-# Variabel optimasi untuk mendeteksi cache kedaluwarsa (TTL)
 LAST_SUCCESSFUL_SCAN_TIME = 0
 CACHE_TTL_SECONDS = 120  
+
+# Penyimpanan data historis btc untuk kebutuhan perhitungan korelasi pearson
+GLOBAL_BTC_RETURNS = []
 
 # Set pencarian cepat O(1) untuk menyaring koin hitam (Blacklist)
 COIN_BLACKLIST = {'UPUSDT', 'DOWNUSDT', 'BUSDUSDT', 'USDCUSDT', 'FDUSDUSDT', 'EURUSDT'}
@@ -27,11 +28,7 @@ TELEGRAM_CHAT_ID = "@cryptoradar_quantum"
 
 LIVE_PRICE_MAP = {}
 GLOBAL_BTC_STATUS = {"is_safe": True, "reason": "Connecting"}
-
-# Menyimpan riwayat harga tertinggi portofolio untuk keperluan Trailing Stop Dinamis
 GLOBAL_TRAILING_PEAKS = {}
-
-# Struktur nested dictionary untuk isolasi multi-device
 GLOBAL_PORTFOLIO_DYNAMICS = {} 
 
 async def send_telegram_alert_async(message):
@@ -49,7 +46,7 @@ async def send_telegram_alert_async(message):
         return False
 
 async def check_bitcoin_circuit_breaker(client):
-    global GLOBAL_BTC_STATUS
+    global GLOBAL_BTC_STATUS, GLOBAL_BTC_RETURNS
     try:
         url = "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1h&limit=48"
         response = await client.get(url, timeout=4)
@@ -60,6 +57,16 @@ async def check_bitcoin_circuit_breaker(client):
             btc_ma24 = sum(closes[-24:]) / 24
             btc_open_1h = float(klines[-1][1])
             btc_change_1h = ((live_btc - btc_open_1h) / btc_open_1h) * 100
+
+            # Simpan data return 24 jam untuk kalkulasi Pearson Correlation
+            GLOBAL_BTC_RETURNS = []
+            for i in range(-24, 0):
+                try:
+                    c_open = float(klines[i][1])
+                    c_close = float(klines[i][4])
+                    GLOBAL_BTC_RETURNS.append((c_close - c_open) / c_open)
+                except:
+                    pass
 
             if btc_change_1h <= -1.5:
                 GLOBAL_BTC_STATUS = {"is_safe": False, "reason": f"BTC DUMP ({btc_change_1h:.1f}%)"}
@@ -142,7 +149,6 @@ def calculate_std_dev(prices, period):
 def detect_bullish_divergence(prices, macd_hists, period=10):
     if len(prices) < period or len(macd_hists) < period: 
         return False
-    
     recent_prices = prices[-period:]
     recent_macd = macd_hists[-period:]
     min_p_idx = recent_prices.index(min(recent_prices))
@@ -168,7 +174,6 @@ def calculate_macd_efficient(prices):
 
     ema12_list = get_ema_list(prices, 12)
     ema26_list = get_ema_list(prices, 26)
-
     offset = len(ema12_list) - len(ema26_list)
     macd_line = [e12 - e26 for e12, e26 in zip(ema12_list[offset:], ema26_list)]
 
@@ -182,13 +187,42 @@ def calculate_macd_efficient(prices):
 
     current_macd = macd_line[-1]
     hist_list = [m_v - current_signal for m_v in macd_line]
-
     return current_macd, current_signal, current_macd - current_signal, hist_list
+
+def calculate_pearson_correlation(coin_returns, btc_returns):
+    """Menghitung korelasi statistik antara pergerakan koin dengan pergerakan BTC."""
+    if not coin_returns or not btc_returns or len(coin_returns) != len(btc_returns):
+        return 1.0  # Default aman anggap berkorelasi penuh
+    
+    n = len(coin_returns)
+    mean_x = sum(coin_returns) / n
+    mean_y = sum(btc_returns) / n
+    
+    num = sum((coin_returns[i] - mean_x) * (btc_returns[i] - mean_y) for i in range(n))
+    den_x = sum((coin_returns[i] - mean_x) ** 2 for i in range(n))
+    den_y = sum((btc_returns[i] - mean_y) ** 2 for i in range(n))
+    
+    if den_x == 0 or den_y == 0:
+        return 1.0
+    return num / math.sqrt(den_x * den_y)
+
+def detect_fair_value_gap(klines_1h):
+    """Mendeteksi ketidakseimbangan pasar (FVG) pada 3 formasi lilin terakhir."""
+    if len(klines_1h) < 3:
+        return False, 0.0
+    
+    # Ambil Lilin 1, Lilin 2, Lilin 3 (berurutan)
+    high_1 = float(klines_1h[-3][2])
+    low_3 = float(klines_1h[-1][3])
+    
+    # Skenario Bullish FVG (Celah yang ditinggalkan oleh hentakan dorongan naik institusi)
+    if low_3 > high_1:
+        fvg_midpoint = (low_3 + high_1) / 2
+        return True, fvg_midpoint
+    return False, 0.0
 
 def extract_market_structure_and_vol_ma(klines_1h):
     volumes = [float(k[7]) for k in klines_1h]
-    
-    # Perbaikan kalkulasi rata-rata volume agar fleksibel dan tidak hardcode pembagi ke 1.0 jika data kurang
     if len(volumes) > 1:
         historical_vols = volumes[:-1]
         vol_ma20 = sum(historical_vols[-20:]) / min(len(historical_vols), 20)
@@ -197,17 +231,7 @@ def extract_market_structure_and_vol_ma(klines_1h):
 
     highs_48h = [float(k[2]) for k in klines_1h[-49:-1]]
     local_swing_high = max(highs_48h) if highs_48h else 0.0
-
-    obv_proxy = 0
-    for i in range(-5, -1):
-        try:
-            c_close = float(klines_1h[i][4])
-            p_close = float(klines_1h[i-1][4])
-            v = float(klines_1h[i][7])
-            if c_close > p_close: obv_proxy += v
-            elif c_close < p_close: obv_proxy -= v
-        except: pass
-    return vol_ma20, local_swing_high, obv_proxy
+    return vol_ma20, local_swing_high
 
 def calculate_atr_and_spread(klines_1d, klines_1h):
     true_ranges = []
@@ -231,8 +255,6 @@ def hitung_matriks_atr_dinamis(live_price, entry_price, atr, vol_spike_ratio, wh
     elif vol_spike_ratio > 1.8:
         base_tp_multiplier += 0.3
 
-    # OPTIMASI RISIKO: Ketika dominasi whale terlalu ekstrem, perketat jarak Cut Loss (multiplier diperkecil) 
-    # untuk meminimalkan risiko manipulasi/dump mendadak oleh sekelompok entitas besar.
     if whale_dominance > 75.0:
         base_cl_multiplier -= 0.3  
     elif whale_dominance > 55.0:
@@ -240,19 +262,20 @@ def hitung_matriks_atr_dinamis(live_price, entry_price, atr, vol_spike_ratio, wh
 
     if not is_btc_safe:
         base_tp_multiplier -= 0.6  
-        base_cl_multiplier += 0.3  # Jika BTC berbahaya, justru perlebar batas CL agar terhindar dari stop-hunt volatilitas sesaat
+        base_cl_multiplier += 0.3  
 
     base_tp_multiplier = max(1.2, base_tp_multiplier)
     base_cl_multiplier = max(0.8, base_cl_multiplier)
 
+    # ADVANCED LOGIKA: Implementasi Modifikasi Chandelier Exit (Trailing berbasis Puncak Tertinggi)
     if entry_price > 0:
         tp_level = entry_price + (base_tp_multiplier * atr)
         cl_level = entry_price - (base_cl_multiplier * atr)
 
         if highest_peak > entry_price:
-            trailing_stop_floor = highest_peak - (1.2 * atr)
-            if trailing_stop_floor > cl_level:
-                cl_level = trailing_stop_floor
+            chandelier_exit_floor = highest_peak - (1.3 * atr)
+            if chandelier_exit_floor > cl_level:
+                cl_level = chandelier_exit_floor
     else:
         tp_level = live_price + (base_tp_multiplier * atr)
         cl_level = live_price - (base_cl_multiplier * atr)
@@ -260,7 +283,7 @@ def hitung_matriks_atr_dinamis(live_price, entry_price, atr, vol_spike_ratio, wh
     return tp_level, cl_level
 
 async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, semaphore, device_id="default_guest_device"):
-    global LAST_ALERTS_STATE, GLOBAL_TRAILING_PEAKS
+    global LAST_ALERTS_STATE, GLOBAL_TRAILING_PEAKS, GLOBAL_BTC_RETURNS
     async with semaphore:
         task_1w = fetch_klines_safely_async(client, symbol, '1w', 4)   
         task_1d = fetch_klines_safely_async(client, symbol, '1d', 105)  
@@ -279,12 +302,11 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
             price_pct_1h = ((live_price - open_price) / open_price) * 100
             atr, spread_ratio = calculate_atr_and_spread(klines_1d, klines_1h)
 
-            vol_ma20, local_swing_high, obv_proxy = extract_market_structure_and_vol_ma(klines_1h)
+            vol_ma20, local_swing_high = extract_market_structure_and_vol_ma(klines_1h)
             daily_closes = [float(k[4]) for k in klines_1d]
             hourly_closes = [float(k[4]) for k in klines_1h]
             ma25_daily, ma99_daily = calculate_ma(daily_closes, 25), calculate_ma(daily_closes, 99)
 
-            # OPTIMASI: Pindahkan eksekusi matematika MACD berat ke ThreadPool terpisah agar Event Loop utama Flask tidak freeze
             macd_line, signal_line, macd_hist, hist_list = await asyncio.to_thread(calculate_macd_efficient, hourly_closes)
             
             is_ma_trend_bullish = live_price > ma25_daily and live_price > ma99_daily
@@ -292,15 +314,29 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
 
             live_volume = float(klines_1h[-1][7])
             vol_spike_ratio = live_volume / vol_ma20 if vol_ma20 > 0 else 0
-
-            # OPTIMASI LOGIKA 1: Batas persentase kenaikan harga tidak lagi statis (0.4%), melainkan berbasis volatilitas dinamis (ATR)
             volatility_based_threshold = max(0.2, min(1.5, (atr / live_price) * 100 * 0.15)) if live_price > 0 else 0.4
 
-            # 1. Volume Velocity
+            # Hitung Data Return Koin untuk Pearson Correlation terhadap BTC
+            coin_returns = []
+            for i in range(-24, 0):
+                try:
+                    c_open = float(klines_1h[i][1])
+                    c_close = float(klines_1h[i][4])
+                    coin_returns.append((c_close - c_open) / c_open)
+                except:
+                    pass
+            
+            # Eksekusi kalkulasi Korelasi Matematika berat di Worker Thread terpisah
+            btc_correlation = await asyncio.to_thread(calculate_pearson_correlation, coin_returns, GLOBAL_BTC_RETURNS)
+            is_uncorrelated_or_decoupled = btc_correlation < 0.20
+
+            # Deteksi Pola Fair Value Gap (FVG)
+            has_fvg, fvg_target_price = detect_fair_value_gap(klines_1h)
+
+            # Sinyal Proaktif Properti Tambahan
             prev_volume = float(klines_1h[-2][7]) if len(klines_1h) >= 2 else 1.0
             vol_velocity = (live_volume - prev_volume) / prev_volume if prev_volume > 0 else 0.0
 
-            # 2. Volatility Squeeze
             std_dev_20 = calculate_std_dev(hourly_closes, 20)
             bb_upper = calculate_ma(hourly_closes, 20) + (2.0 * std_dev_20)
             bb_lower = calculate_ma(hourly_closes, 20) - (2.0 * std_dev_20)
@@ -308,12 +344,10 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
             kc_lower = calculate_ma(hourly_closes, 20) - (1.5 * atr)
             is_squeeze = (bb_upper < kc_upper) and (bb_lower > kc_lower)
 
-            # 3. Bullish Divergence
             is_bullish_div = False
             if len(hourly_closes) >= 10 and max(hourly_closes[-10:]) != min(hourly_closes[-10:]):
                 is_bullish_div = detect_bullish_divergence(hourly_closes, hist_list, period=10)
 
-            # 4. Z-Score
             z_score = (live_price - ma25_daily) / std_dev_20 if std_dev_20 > 0 else 0.0
 
             market_liquidity_pool = m_data.get("pure_vol_24h", 0)
@@ -321,8 +355,9 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
             elif market_liquidity_pool <= 5000000: required_vol_spike = 3.5
             else: required_vol_spike = 2.0
 
-            prev_hour_close = float(klines_1h[-2][4])
-            is_msb_breakout = (live_price > local_swing_high) and (prev_hour_close > local_swing_high * 0.995) and local_swing_high > 0
+            # ADVANCED LOGIKA: Market Structure Shift (MSS) Berbasis Candle Close (Bukan Ekor / Liquidity Sweep)
+            current_hour_close = float(klines_1h[-1][4])
+            is_mss_breakout = (current_hour_close > local_swing_high) and local_swing_high > 0
 
             hour_high, hour_low = float(klines_1h[-1][2]), float(klines_1h[-1][3])
             candle_body = abs(live_price - open_price)
@@ -331,8 +366,6 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
             is_whale_churning = (vol_spike_ratio > required_vol_spike * 1.5) and (body_to_range_ratio < 0.20)
 
             base_whale = 30.0 + (vol_spike_ratio * 12.0)
-            if obv_proxy > 0: base_whale += 15.0
-            if spread_ratio < 0.9: base_whale += 10.0
             if is_whale_churning: base_whale -= 25.0  
             whale_dominance = round(max(10.0, min(99.0, base_whale)), 1)
 
@@ -340,11 +373,13 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
             momentum_score = (vol_spike_ratio * 35) + (whale_dominance * 0.5) + (price_pct_1h * 15)
             is_overextended = (live_price > ma25_daily + (2.5 * atr)) and atr > 0
 
-            if not GLOBAL_BTC_STATUS["is_safe"] and coin_name not in user_portfolio:
+            # ADVANCED LOGIKA: Jika BTC dump/bearish tetapi koin mengalami rotasi independen (Decoupled), kunci mesin dilepas
+            is_engine_locked = not GLOBAL_BTC_STATUS["is_safe"] and not is_uncorrelated_or_decoupled
+
+            if is_engine_locked and coin_name not in user_portfolio:
                 fase = f"ENGINE LOCKED ({GLOBAL_BTC_STATUS['reason']})"
                 momentum_score = 0
             else:
-                # Skenario Proaktif Sinyal Awal
                 if is_squeeze and vol_velocity > 1.8 and price_pct_1h > volatility_based_threshold:
                     fase = "⚡ SQUEEZE BREAKOUT (EARLY TREND)"
                     momentum_score += 140
@@ -354,13 +389,10 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
                 elif is_bullish_div and price_pct_1h > volatility_based_threshold:
                     fase = "🔄 MOMENTUM REVERSAL (BOTTOMING)"
                     momentum_score += 100
-                
-                # Skenario Struktural Konvensional
                 elif price_pct_1h > volatility_based_threshold and vol_spike_ratio >= required_vol_spike and not is_whale_churning:
-                    # OPTIMASI LOGIKA 2 (Hierarki Tren Ketat): Hanya izinkan label INSTITUTIONAL BUY jika posisi harga terkonfirmasi di atas garis tren makro harian (ma99_daily)
-                    if is_msb_breakout and is_macro_bullish and is_ma_trend_bullish and is_macd_momentum_bullish and (live_price > ma99_daily):
+                    if is_mss_breakout and is_macro_bullish and is_ma_trend_bullish and is_macd_momentum_bullish and (live_price > ma99_daily):
                         fase, momentum_score = "INSTITUTIONAL BUY", momentum_score + 150
-                    elif is_msb_breakout:
+                    elif is_mss_breakout:
                         fase, momentum_score = "VALID BREAKOUT", momentum_score + 80
                     else:
                         fase = "EARLY RALLY"
@@ -383,19 +415,20 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
 
             harga_terformat = f"${live_price:.8f}" if live_price < 1.0 else f"${live_price:.4f}"
 
-            # Sinyal Pemancar Isyarat Telegram Otomatis Asinkronus
             if coin_name not in LAST_ALERTS_STATE or LAST_ALERTS_STATE[coin_name] != fase:
-                if fase in ["VALID BREAKOUT", "INSTITUTIONAL BUY", "⚡ SQUEEZE BREAKOUT (EARLY TREND)", "🐳 WHALE ACCUMULATION (SILENT)"] and GLOBAL_BTC_STATUS["is_safe"] and vol_spike_ratio >= 2.0:
-                    if fase == "INSTITUTIONAL BUY": emoji = "👑 BRAND NEW MSB!"
+                if fase in ["VALID BREAKOUT", "INSTITUTIONAL BUY", "⚡ SQUEEZE BREAKOUT (EARLY TREND)", "🐳 WHALE ACCUMULATION (SILENT)"] and (GLOBAL_BTC_STATUS["is_safe"] or is_uncorrelated_or_decoupled) and vol_spike_ratio >= 2.0:
+                    if fase == "INSTITUTIONAL BUY": emoji = "👑 BRAND NEW MSS BREAKOUT!"
                     elif fase == "⚡ SQUEEZE BREAKOUT (EARLY TREND)": emoji = "⚡ SQUEEZE BREAKOUT"
-                    elif fase == "🐳 WHALE ACCUMULATION (SILENT)": emoji = "🐳 WHALE ACCUMULATION DETECTED"
+                    elif fase == "🐳 WHALE ACCUMULATION (SILENT)": emoji = "🐳 DECOUPLED WHALE ACCUMULATION"
                     else: emoji = "🔥 BREAKOUT SPIKE"
                     
-                    # Menggunakan await asinkronus (Tidak menghentikan proses scanning koin lain)
+                    fvg_info = f"\n⚠️ Fair Value Gap Spotted: `Yes (Retest Area: ${fvg_target_price:.4f})`" if has_fvg else ""
+                    decouple_info = f"\n🔄 BTC Correlation: `{btc_correlation:.2f} (Decoupled From Core)`" if is_uncorrelated_or_decoupled else f"\n🔄 BTC Correlation: `{btc_correlation:.2f}`"
+
                     await send_telegram_alert_async(
                         f"{emoji}\n\nCoin: *{coin_name}*\nMarket Phase: `{fase}`\n"
                         f"Vol vs MA20 Speed: `{vol_spike_ratio:.1f}x` (Velocity: {vol_velocity*100:.1f}%)\n"
-                        f"Whale Dominance: `{whale_dominance}%` (Z-Score: {z_score:.2f})\n"
+                        f"Whale Dominance: `{whale_dominance}%` (Z-Score: {z_score:.2f}){decouple_info}{fvg_info}\n"
                         f"Live Price: `*{harga_terformat}*`"
                     )
                 LAST_ALERTS_STATE[coin_name] = fase
@@ -408,7 +441,6 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
             if entry_price > 0 and amount > 0:
                 if device_id not in GLOBAL_TRAILING_PEAKS:
                     GLOBAL_TRAILING_PEAKS[device_id] = {}
-
                 old_peak = GLOBAL_TRAILING_PEAKS[device_id].get(coin_name, entry_price)
                 current_peak = max(old_peak, live_price)
                 GLOBAL_TRAILING_PEAKS[device_id][coin_name] = current_peak
@@ -425,14 +457,12 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
 
             max_allowed_atr = live_price * 0.15
             smoothed_atr = min(atr, max_allowed_atr) if atr > 0 else (live_price * 0.02)
-            is_volume_backed_breakout = (vol_spike_ratio >= required_vol_spike) and (whale_dominance >= 50.0)
-
-            if status_rencana_otomatis == "BUY STAGE" and is_msb_breakout and is_volume_backed_breakout:
+            
+            # ADVANCED LOGIKA ENTRY: Jika terdeteksi FVG pasar, optimalkan antrean beli di area batas FVG tersebut
+            if status_rencana_otomatis == "BUY STAGE" and has_fvg:
+                saran_entry = fvg_target_price
+            elif status_rencana_otomatis == "BUY STAGE" and is_mss_breakout:
                 saran_entry = local_swing_high + (0.15 * smoothed_atr)
-            elif status_rencana_otomatis == "BUY STAGE" and not is_volume_backed_breakout:
-                saran_entry = live_price - (0.75 * smoothed_atr)
-                if fase == "EARLY RALLY":
-                    fase = "EARLY RALLY (WEAK VOL)"
             else:
                 saran_entry = live_price - (0.5 * smoothed_atr)
 
@@ -464,7 +494,6 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
 
 async def execute_one_market_scan(target_device_id=None, minimal_bootstrap=False):
     global MARKET_DATA_CACHE, LAST_SUCCESSFUL_SCAN_TIME
-
     async with httpx.AsyncClient(
         limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
         timeout=httpx.Timeout(5.0)
@@ -500,7 +529,6 @@ async def execute_one_market_scan(target_device_id=None, minimal_bootstrap=False
 
             MARKET_DATA_CACHE = temp_data
             LAST_SUCCESSFUL_SCAN_TIME = time.time()
-            print(f"Scan completed successfully. Coins in cache: {len(MARKET_DATA_CACHE)}")
         except Exception as e:
             print(f"Error during core scan execution: {e}")
 
@@ -528,7 +556,6 @@ def index():
 @app.route('/api/data', methods=['POST'])
 def get_data():
     global GLOBAL_PORTFOLIO_DYNAMICS, GLOBAL_TRAILING_PEAKS, MARKET_DATA_CACHE
-
     req = request.json or {}
     device_id = req.get("device_id", "default_guest_device")
 
@@ -541,7 +568,6 @@ def get_data():
         print(f"Failed to synchronize device dynamic cache: {e}")
 
     if not MARKET_DATA_CACHE:
-        print("Initial cache is empty! Executing ultra-fast minimal bootstrap...")
         try:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
@@ -550,9 +576,6 @@ def get_data():
             print(f"Fast bootstrap failed: {e}")
 
     active_portfolio = GLOBAL_PORTFOLIO_DYNAMICS.get(device_id, {})
-    
-    # OPTIMASI MULTI-USER: Lakukan isolasi penuh (deep copy) pada data cache utama ke variabel lokal baru 
-    # agar modifikasi data portofolio satu pengguna tidak merusak/terbaca oleh pengguna lain di saat bersamaan.
     user_market_data = []
 
     for original_item in MARKET_DATA_CACHE:
@@ -622,7 +645,6 @@ def get_data():
         user_market_data.append(item)
 
     user_market_data.sort(key=lambda x: (x['is_portfolio'], x['skor']), reverse=True)
-
     return jsonify({
         "btc_status": GLOBAL_BTC_STATUS,
         "market": user_market_data
@@ -654,7 +676,6 @@ def send_manual_alert():
             f"Suggested Entry Trigger: `*{saran_fmt}*`"
         )
 
-        # Menjalankan fungsi asinkronus menggunakan event loop bawaan untuk rute sinkron Flask biasa
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         success = loop.run_until_complete(send_telegram_alert_async(msg))
