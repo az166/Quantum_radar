@@ -4,9 +4,12 @@ import httpx
 import asyncio
 import time
 import copy
-from threading import Thread
+from threading import Thread, Lock
 
 app = Flask(__name__)
+
+# Kunci sinkronisasi untuk mengamankan data dari Race Condition
+GLOBAL_LOCK = Lock()
 
 # Cache utama dan data sinkronisasi global
 MARKET_DATA_CACHE = []
@@ -45,6 +48,17 @@ async def send_telegram_alert_async(message):
         print(f"Failed to send Telegram alert: {e}")
         return False
 
+def send_telegram_in_worker_thread(message):
+    """Menjalankan pengiriman notifikasi di thread terpisah agar tidak membebani Flask."""
+    def worker():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(send_telegram_alert_async(message))
+        finally:
+            loop.close()
+    Thread(target=worker, daemon=True).start()
+
 async def check_bitcoin_circuit_breaker(client):
     global GLOBAL_BTC_STATUS, GLOBAL_BTC_RETURNS
     try:
@@ -74,19 +88,25 @@ async def check_bitcoin_circuit_breaker(client):
                     local_returns.append((c_close - c_open) / c_open)
                 except:
                     pass
-            GLOBAL_BTC_RETURNS = local_returns
+            
+            with GLOBAL_LOCK:
+                GLOBAL_BTC_RETURNS = local_returns
 
             if btc_flash_change <= -1.0:
-                GLOBAL_BTC_STATUS = {"is_safe": False, "reason": f"⚡ BTC FLASH DUMP ({btc_flash_change:.1f}%)"}
+                new_status = {"is_safe": False, "reason": f"⚡ BTC FLASH DUMP ({btc_flash_change:.1f}%)"}
             elif btc_change_1h <= -1.5:
-                GLOBAL_BTC_STATUS = {"is_safe": False, "reason": f"BTC DUMP ({btc_change_1h:.1f}%)"}
+                new_status = {"is_safe": False, "reason": f"BTC DUMP ({btc_change_1h:.1f}%)"}
             elif live_btc < btc_ma24:
-                GLOBAL_BTC_STATUS = {"is_safe": False, "reason": "BTC BEARISH (Below MA24)"}
+                new_status = {"is_safe": False, "reason": "BTC BEARISH (Below MA24)"}
             else:
-                GLOBAL_BTC_STATUS = {"is_safe": True, "reason": "BTC SAFE"}
+                new_status = {"is_safe": True, "reason": "BTC SAFE"}
+                
+            with GLOBAL_LOCK:
+                GLOBAL_BTC_STATUS = new_status
     except Exception as e:
         print(f"Error checking BTC status: {e}")
-        GLOBAL_BTC_STATUS = {"is_safe": True, "reason": "BTC CHECK DELAYED"}
+        with GLOBAL_LOCK:
+            GLOBAL_BTC_STATUS = {"is_safe": True, "reason": "BTC CHECK DELAYED"}
 
 async def get_combined_tickers_data_async(client):
     global LIVE_PRICE_MAP
@@ -98,11 +118,12 @@ async def get_combined_tickers_data_async(client):
             ticker_dict = {}
             filtered_list = []
 
+            local_live_prices = {}
             for t in all_tickers:
                 symbol = t['symbol']
                 if symbol.endswith('USDT') and (symbol not in COIN_BLACKLIST):
                     live_p = float(t['lastPrice'])
-                    LIVE_PRICE_MAP[symbol] = live_p
+                    local_live_prices[symbol] = live_p
 
                     filtered_list.append({
                         "symbol": symbol,
@@ -110,13 +131,17 @@ async def get_combined_tickers_data_async(client):
                         "price_change_pct_24h": float(t['priceChangePercent'])
                     })
 
+            with GLOBAL_LOCK:
+                LIVE_PRICE_MAP.update(local_live_prices)
+
             filtered_list.sort(key=lambda x: x['pure_vol_24h'], reverse=True)
             top_50_symbols = [item['symbol'] for item in filtered_list[:50]]
 
             portfolio_symbols = []
-            for dev_id, proto_data in GLOBAL_PORTFOLIO_DYNAMICS.items():
-                if isinstance(proto_data, dict):
-                    portfolio_symbols.extend([f"{coin}USDT" for coin in proto_data.keys()])
+            with GLOBAL_LOCK:
+                for dev_id, proto_data in GLOBAL_PORTFOLIO_DYNAMICS.items():
+                    if isinstance(proto_data, dict):
+                        portfolio_symbols.extend([f"{coin}USDT" for coin in proto_data.keys()])
 
             target_symbols = list(set(top_50_symbols + portfolio_symbols))
 
@@ -127,9 +152,10 @@ async def get_combined_tickers_data_async(client):
                         "price_change_pct_24h": item['price_change_pct_24h']
                     }
 
-            for sym in target_symbols:
-                if sym not in LIVE_PRICE_MAP:
-                    LIVE_PRICE_MAP[sym] = 0.0
+            with GLOBAL_LOCK:
+                for sym in target_symbols:
+                    if sym not in LIVE_PRICE_MAP:
+                        LIVE_PRICE_MAP[sym] = 0.0
 
             return ticker_dict
     except Exception as e:
@@ -338,7 +364,12 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
             w1_close, w2_close = float(klines_1w[-2][4]), float(klines_1w[-3][4])
             is_macro_bullish = w1_close >= w2_close  
 
-            live_price = LIVE_PRICE_MAP.get(symbol, float(klines_1h[-1][4]))
+            with GLOBAL_LOCK:
+                live_price = LIVE_PRICE_MAP.get(symbol, float(klines_1h[-1][4]))
+                btc_returns_snapshot = list(GLOBAL_BTC_RETURNS)
+                btc_safe_snapshot = GLOBAL_BTC_STATUS["is_safe"]
+                btc_reason_snapshot = GLOBAL_BTC_STATUS["reason"]
+
             open_price = float(klines_1h[-1][1])
             price_pct_1h = ((live_price - open_price) / open_price) * 100
             atr, spread_ratio = calculate_atr_and_spread(klines_1d, klines_1h)
@@ -372,7 +403,7 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
                 except:
                     pass
 
-            btc_correlation = await asyncio.to_thread(calculate_pearson_correlation, coin_returns, GLOBAL_BTC_RETURNS)
+            btc_correlation = await asyncio.to_thread(calculate_pearson_correlation, coin_returns, btc_returns_snapshot)
             is_uncorrelated_or_decoupled = btc_correlation < 0.20
 
             has_fvg, fvg_target_price = detect_fair_value_gap(klines_1h)
@@ -417,10 +448,10 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
             momentum_score = (vol_spike_ratio * 35) + (whale_dominance * 0.5) + (price_pct_1h * 15)
             is_overextended = (live_price > ma25_daily + (2.5 * atr)) and atr > 0
 
-            is_engine_locked = not GLOBAL_BTC_STATUS["is_safe"] and not is_uncorrelated_or_decoupled
+            is_engine_locked = not btc_safe_snapshot and not is_uncorrelated_or_decoupled
 
             if is_engine_locked and coin_name not in user_portfolio:
-                fase = f"ENGINE LOCKED ({GLOBAL_BTC_STATUS['reason']})"
+                fase = f"ENGINE LOCKED ({btc_reason_snapshot})"
                 momentum_score = 0
             else:
                 if is_squeeze and (vol_velocity > 1.8 or is_15m_volume_burst) and price_pct_1h > volatility_based_threshold and is_obv_healthy:
@@ -458,24 +489,29 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
 
             harga_terformat = f"${live_price:.8f}" if live_price < 1.0 else f"${live_price:.4f}"
 
-            if coin_name not in LAST_ALERTS_STATE or LAST_ALERTS_STATE[coin_name] != fase:
-                if fase in ["VALID BREAKOUT", "INSTITUTIONAL BUY", "⚡ SQUEEZE BREAKOUT (EARLY TREND)", "🐳 WHALE ACCUMULATION (SILENT)"] and (GLOBAL_BTC_STATUS["is_safe"] or is_uncorrelated_or_decoupled) and vol_spike_ratio >= 2.0:
+            with GLOBAL_LOCK:
+                alert_state_differs = coin_name not in LAST_ALERTS_STATE or LAST_ALERTS_STATE[coin_name] != fase
+
+            if alert_state_differs:
+                if fase in ["VALID BREAKOUT", "INSTITUTIONAL BUY", "⚡ SQUEEZE BREAKOUT (EARLY TREND)", "🐳 WHALE ACCUMULATION (SILENT)"] and (btc_safe_snapshot or is_uncorrelated_or_decoupled) and vol_spike_ratio >= 2.0:
                     if fase == "INSTITUTIONAL BUY": emoji = "👑 BRAND NEW MSS BREAKOUT!"
                     elif fase == "⚡ SQUEEZE BREAKOUT (EARLY TREND)": emoji = "⚡ SQUEEZE BREAKOUT"
                     elif fase == "🐳 WHALE ACCUMULATION (SILENT)": emoji = "🐳 DECOUPLED WHALE ACCUMULATION"
                     else: emoji = "🔥 BREAKOUT SPIKE"
 
-                    fvg_info = f"\n⚠️ Fair Value Gap Spotted: `Yes (Retest Area: ${fvg_target_price:.4f})`" if has_fvg else ""
-                    decouple_info = f"\n🔄 BTC Correlation: `{btc_correlation:.2f} (Decoupled From Core)`" if is_uncorrelated_or_decoupled else f"\n🔄 BTC Correlation: `{btc_correlation:.2f}`"
-                    depth_info = f"\n📊 Order Book Bid/Ask Ratio: `{order_book_ratio:.2f}x`"
+                    fvg_info = f"\n⚠️ Fair Value Gap Spotted: Yes (Retest Area: ${fvg_target_price:.4f})" if has_fvg else ""
+                    decouple_info = f"\n🔄 BTC Correlation: {btc_correlation:.2f} (Decoupled From Core)" if is_uncorrelated_or_decoupled else f"\n🔄 BTC Correlation: {btc_correlation:.2f}"
+                    depth_info = f"\n📊 Order Book Bid/Ask Ratio: {order_book_ratio:.2f}x"
 
-                    await send_telegram_alert_async(
+                    # Menjalankan notifikasi di thread pekerja terpisah
+                    send_telegram_in_worker_thread(
                         f"{emoji}\n\nCoin: *{coin_name}*\nMarket Phase: `{fase}`\n"
                         f"Vol vs MA20 Speed: `{vol_spike_ratio:.1f}x` (Velocity: {vol_velocity*100:.1f}%)\n"
                         f"Whale Dominance: `{whale_dominance}%` (Z-Score: {z_score:.2f}){decouple_info}{fvg_info}{depth_info}\n"
-                        f"Live Price: `*{harga_terformat}*`"
+                        f"Live Price: *{harga_terformat}*"
                     )
-                LAST_ALERTS_STATE[coin_name] = fase
+                with GLOBAL_LOCK:
+                    LAST_ALERTS_STATE[coin_name] = fase
 
             coin_p_data = user_portfolio.get(coin_name, {})
             entry_price = coin_p_data.get("costPrice", 0.0)
@@ -483,11 +519,12 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
 
             current_peak = 0.0
             if entry_price > 0 and amount > 0:
-                if device_id not in GLOBAL_TRAILING_PEAKS:
-                    GLOBAL_TRAILING_PEAKS[device_id] = {}
-                old_peak = GLOBAL_TRAILING_PEAKS[device_id].get(coin_name, entry_price)
-                current_peak = max(old_peak, live_price)
-                GLOBAL_TRAILING_PEAKS[device_id][coin_name] = current_peak
+                with GLOBAL_LOCK:
+                    if device_id not in GLOBAL_TRAILING_PEAKS:
+                        GLOBAL_TRAILING_PEAKS[device_id] = {}
+                    old_peak = GLOBAL_TRAILING_PEAKS[device_id].get(coin_name, entry_price)
+                    current_peak = max(old_peak, live_price)
+                    GLOBAL_TRAILING_PEAKS[device_id][coin_name] = current_peak
 
             dynamic_tp, dynamic_cl = hitung_matriks_atr_dinamis(
                 live_price=live_price,
@@ -495,7 +532,7 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
                 atr=atr,
                 vol_spike_ratio=vol_spike_ratio,
                 whale_dominance=whale_dominance,
-                is_btc_safe=GLOBAL_BTC_STATUS["is_safe"],
+                is_btc_safe=btc_safe_snapshot,
                 highest_peak=current_peak
             )
 
@@ -555,8 +592,10 @@ async def execute_one_market_scan(target_device_id=None, minimal_bootstrap=False
 
             active_portfolio = {}
             dev_id_key = target_device_id if target_device_id else "default_guest_device"
-            if target_device_id and target_device_id in GLOBAL_PORTFOLIO_DYNAMICS:
-                active_portfolio = GLOBAL_PORTFOLIO_DYNAMICS[target_device_id]
+            
+            with GLOBAL_LOCK:
+                if target_device_id and target_device_id in GLOBAL_PORTFOLIO_DYNAMICS:
+                    active_portfolio = dict(GLOBAL_PORTFOLIO_DYNAMICS[target_device_id])
 
             tasks = [process_single_coin_pipeline(brass_client, symbol, m_data, active_portfolio, semaphore, dev_id_key) for symbol, m_data in ticker_master_data.items()]
             results = await asyncio.gather(*tasks)
@@ -564,14 +603,15 @@ async def execute_one_market_scan(target_device_id=None, minimal_bootstrap=False
 
             temp_data.sort(key=lambda x: (x['is_portfolio'], x['skor']), reverse=True)
 
-            if minimal_bootstrap and MARKET_DATA_CACHE:
-                existing_coins = {x['koin'] for x in temp_data}
-                for old_item in MARKET_DATA_CACHE:
-                    if old_item['koin'] not in existing_coins:
-                        temp_data.append(old_item)
+            with GLOBAL_LOCK:
+                if minimal_bootstrap and MARKET_DATA_CACHE:
+                    existing_coins = {x['koin'] for x in temp_data}
+                    for old_item in MARKET_DATA_CACHE:
+                        if old_item['koin'] not in existing_coins:
+                            temp_data.append(old_item)
 
-            MARKET_DATA_CACHE = temp_data
-            LAST_SUCCESSFUL_SCAN_TIME = time.time()
+                MARKET_DATA_CACHE = temp_data
+                LAST_SUCCESSFUL_SCAN_TIME = time.time()
         except Exception as e:
             print(f"Error during core scan execution: {e}")
 
@@ -608,14 +648,19 @@ def get_data():
     device_id = req.get("device_id", "default_guest_device")
 
     try:
-        GLOBAL_PORTFOLIO_DYNAMICS[device_id] = req.get("portfolio", {})
-        if device_id in GLOBAL_TRAILING_PEAKS:
-            active_coins = GLOBAL_PORTFOLIO_DYNAMICS[device_id].keys()
-            GLOBAL_TRAILING_PEAKS[device_id] = {k: v for k, v in GLOBAL_TRAILING_PEAKS[device_id].items() if k in active_coins}
+        with GLOBAL_LOCK:
+            GLOBAL_PORTFOLIO_DYNAMICS[device_id] = req.get("portfolio", {})
+            if device_id in GLOBAL_TRAILING_PEAKS:
+                active_coins = GLOBAL_PORTFOLIO_DYNAMICS[device_id].keys()
+                GLOBAL_TRAILING_PEAKS[device_id] = {k: v for k, v in GLOBAL_TRAILING_PEAKS[device_id].items() if k in active_coins}
     except Exception as e:
         print(f"Failed to synchronize device dynamic cache: {e}")
 
-    if not MARKET_DATA_CACHE:
+    # Mengecek ketahanan cache lokal tanpa memblokir pemanggilan utama
+    with GLOBAL_LOCK:
+        cache_empty = not MARKET_DATA_CACHE
+
+    if cache_empty:
         try:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
@@ -628,11 +673,15 @@ def get_data():
             except:
                 pass
 
-    active_portfolio = GLOBAL_PORTFOLIO_DYNAMICS.get(device_id, {})
+    with GLOBAL_LOCK:
+        active_portfolio = dict(GLOBAL_PORTFOLIO_DYNAMICS.get(device_id, {}))
+        cache_snapshot = copy.deepcopy(MARKET_DATA_CACHE)
+        btc_safe_snapshot = GLOBAL_BTC_STATUS["is_safe"]
+
     user_market_data = []
 
-    for original_item in MARKET_DATA_CACHE:
-        item = copy.deepcopy(original_item)
+    for original_item in cache_snapshot:
+        item = original_item  # Deepcopy sudah dilakukan di atas level lock global
         coin = item["koin"]
 
         if coin in active_portfolio:
@@ -643,11 +692,12 @@ def get_data():
 
             current_peak = 0.0
             if item["entry"] > 0 and item["amount"] > 0:
-                if device_id not in GLOBAL_TRAILING_PEAKS:
-                    GLOBAL_TRAILING_PEAKS[device_id] = {}
-                old_peak = GLOBAL_TRAILING_PEAKS[device_id].get(coin, item["entry"])
-                current_peak = max(old_peak, item["harga"])
-                GLOBAL_TRAILING_PEAKS[device_id][coin] = current_peak
+                with GLOBAL_LOCK:
+                    if device_id not in GLOBAL_TRAILING_PEAKS:
+                        GLOBAL_TRAILING_PEAKS[device_id] = {}
+                    old_peak = GLOBAL_TRAILING_PEAKS[device_id].get(coin, item["entry"])
+                    current_peak = max(old_peak, item["harga"])
+                    GLOBAL_TRAILING_PEAKS[device_id][coin] = current_peak
 
             if item["entry"] > 0 and item["amount"] > 0:
                 dtp, dcl = hitung_matriks_atr_dinamis(
@@ -656,7 +706,7 @@ def get_data():
                     atr=item["atr"],
                     vol_spike_ratio=item["rasio"],
                     whale_dominance=item["whale"],
-                    is_btc_safe=GLOBAL_BTC_STATUS["is_safe"],
+                    is_btc_safe=btc_safe_snapshot,
                     highest_peak=current_peak
                 )
                 item["tp"] = dtp
@@ -683,7 +733,7 @@ def get_data():
                 atr=item["atr"],
                 vol_spike_ratio=item["rasio"],
                 whale_dominance=item["whale"],
-                is_btc_safe=GLOBAL_BTC_STATUS["is_safe"]
+                is_btc_safe=btc_safe_snapshot
             )
             item["tp"] = dtp
             item["cl"] = dcl
@@ -701,8 +751,12 @@ def get_data():
         user_market_data.append(item)
 
     user_market_data.sort(key=lambda x: (x['is_portfolio'], x['skor']), reverse=True)
+    
+    with GLOBAL_LOCK:
+        btc_status_response = dict(GLOBAL_BTC_STATUS)
+
     return jsonify({
-        "btc_status": GLOBAL_BTC_STATUS,
+        "btc_status": btc_status_response,
         "market": user_market_data
     })
 
@@ -724,24 +778,18 @@ def send_manual_alert():
         msg = (
             f"📢 *MANUAL QUANTUM SIGNAL ALERT*\n\n"
             f"Coin: *{coin}*\n"
-            f"Market Phase: `{fase}`\n"
-            f"Current Price: `*{harga_fmt}*`\n"
-            f"Vol vs MA20: `{rasio:.1f}x`\n"
-            f"Whale Dominance: `{whale}%`\n"
+            f"Market Phase: {fase}\n"
+            f"Current Price: {harga_fmt}\n"
+            f"Vol vs MA20: {rasio:.1f}x\n"
+            f"Whale Dominance: {whale}%\n"
             f"Action Strategy: *{status_aksi}*\n"
-            f"Suggested Entry Trigger: `*{saran_fmt}*`"
+            f"Suggested Entry Trigger: {saran_fmt}"
         )
 
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            success = loop.run_until_complete(send_telegram_alert_async(msg))
-        finally:
-            loop.close()
+        # Menggunakan thread terpisah agar proses pengiriman manual tidak membekukan endpoint Flask
+        send_telegram_in_worker_thread(msg)
 
-        if success:
-            return jsonify({"status": "success", "message": "Signal broadcasted!"})
-        return jsonify({"status": "error", "message": "Failed to send message via Telegram."}), 500
+        return jsonify({"status": "success", "message": "Signal broadcast initiated!"})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 400
 
